@@ -1,4 +1,4 @@
-Python#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 FTX-1 Meter Monitor v1.2.2 - Preamp/ATT now read-only (Hamlib set not supported)
 Power, Squelch, AGC, Mode settable; startup sync, green confirmation on set items
