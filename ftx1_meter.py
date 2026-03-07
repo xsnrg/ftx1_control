@@ -54,6 +54,8 @@ class FTX1MeterMonitor:
 
         self.root.after(500, self.update_readings)
 
+        self.ignore_readback_until = 0.0
+
     def build_gui(self):
         ttk.Label(self.root, textvariable=self.status_var, font=("Arial", 9)).pack(pady=(8, 4))
 
@@ -206,7 +208,8 @@ class FTX1MeterMonitor:
             self.status_var.set("Not connected")
             return
 
-        self.ignore_readback_until = time.time() + 8.0  # Prevent snapping
+        self.ignore_readback_until = time.time() + 12.0  # Ignore for 12 seconds after change
+        self.status_var.set("Changes applied - waiting 12s for radio to confirm...")
 
         power_w = self.power_var.get()
         power_raw = power_w / 100.0
@@ -380,57 +383,70 @@ class FTX1MeterMonitor:
                 self.meter_labels[name].set(display_val)
                 self.update_progress_bar(name, val)
 
-            # Read-back for controls - skip if recently changed
-            if time.time() < self.ignore_readback_until:
-                self.status_var.set("Waiting for radio to apply changes...")
-            else:
-                pwr_raw = self.rig_cmd("l RFPOWER")
-                if pwr_raw:
-                    try:
-                        raw = float(pwr_raw)
-                        disp_w = raw * 100
-                        self.power_var.set(round(disp_w, 2))
-                        self.power_spin.config(foreground="green" if abs(disp_w - self.last_set["power"] * 100) < 0.5 else "black")
-                    except:
-                        self.power_spin.config(foreground="black")
+                # Read-back for controls - skip if recently changed
+                if time.time() < self.ignore_readback_until:
+                    self.status_var.set("Waiting for radio to apply changes (12s)...")
+                else:
+                    pwr_raw = self.rig_cmd("l RFPOWER")
+                    if pwr_raw:
+                        try:
+                            raw = float(pwr_raw)
+                            disp_w = raw * 100
+                            # Only update if close to last set (prevent snap-back)
+                            if abs(disp_w - self.last_set.get("power", 0) * 100) < 0.5:
+                                self.power_var.set(round(disp_w, 2))
+                                self.power_spin.config(foreground="green")
+                            else:
+                                self.power_spin.config(foreground="black")
+                        except:
+                            self.power_spin.config(foreground="black")
 
-                preamp_raw = self.rig_cmd("l PREAMP")
-                if preamp_raw:
-                    preamp_map_rev = {0: "IPO", 1: "AMP1", 2: "AMP2"}
-                    try:
-                        disp = preamp_map_rev.get(int(float(preamp_raw)), "IPO")
-                        self.preamp_var.set(disp)
-                        self.preamp_combo.config(foreground="green" if disp == self.preamp_var.get() else "black")
-                    except:
-                        self.preamp_combo.config(foreground="black")
+                    preamp_raw = self.rig_cmd("l PREAMP")
+                    if preamp_raw:
+                        preamp_map_rev = {0: "IPO", 1: "AMP1", 2: "AMP2"}
+                        try:
+                            disp = preamp_map_rev.get(int(float(preamp_raw)), "IPO")
+                            if disp == self.preamp_var.get():  # Only color green if matches
+                                self.preamp_combo.config(foreground="green")
+                            else:
+                                self.preamp_combo.config(foreground="black")
+                        except:
+                            self.preamp_combo.config(foreground="black")
 
-                att_raw = self.rig_cmd("l ATT")
-                if att_raw:
-                    att_map_rev = {0: "Off", 6: "-6 dB", 12: "-12 dB", 18: "-18 dB"}
-                    try:
-                        disp = att_map_rev.get(int(float(att_raw)), "Off")
-                        self.att_var.set(disp)
-                        self.att_combo.config(foreground="green" if disp == self.att_var.get() else "black")
-                    except:
-                        self.att_combo.config(foreground="black")
+                    att_raw = self.rig_cmd("l ATT")
+                    if att_raw:
+                        att_map_rev = {0: "Off", 6: "-6 dB", 12: "-12 dB", 18: "-18 dB"}
+                        try:
+                            disp = att_map_rev.get(int(float(att_raw)), "Off")
+                            if disp == self.att_var.get():
+                                self.att_combo.config(foreground="green")
+                            else:
+                                self.att_combo.config(foreground="black")
+                        except:
+                            self.att_combo.config(foreground="black")
 
-                sql_raw = self.rig_cmd("l SQL")
-                if sql_raw:
-                    try:
-                        self.sql_var.set(round(float(sql_raw), 2))
-                        self.sql_spin.config(foreground="green" if abs(float(sql_raw) - self.last_set.get("sql", 0.0)) < 0.05 else "black")
-                    except:
-                        self.sql_spin.config(foreground="black")
+                    sql_raw = self.rig_cmd("l SQL")
+                    if sql_raw:
+                        try:
+                            disp = round(float(sql_raw), 2)
+                            if abs(disp - self.last_set.get("sql", 0.0)) < 0.05:
+                                self.sql_spin.config(foreground="green")
+                            else:
+                                self.sql_spin.config(foreground="black")
+                        except:
+                            self.sql_spin.config(foreground="black")
 
-                agc_raw = self.rig_cmd("l AGC")
-                if agc_raw:
-                    agc_map_rev = {0: "Off", 1: "Fast", 2: "Medium", 3: "Slow", 6: "Auto"}
-                    try:
-                        disp = agc_map_rev.get(int(float(agc_raw)), "Off")
-                        self.agc_var.set(disp)
-                        self.agc_combo.config(foreground="green" if disp == self.agc_var.get() else "black")
-                    except:
-                        self.agc_combo.config(foreground="black")
+                    agc_raw = self.rig_cmd("l AGC")
+                    if agc_raw:
+                        agc_map_rev = {0: "Off", 1: "Fast", 2: "Medium", 3: "Slow", 6: "Auto"}
+                        try:
+                            disp = agc_map_rev.get(int(float(agc_raw)), "Off")
+                            if disp == self.agc_var.get():
+                                self.agc_combo.config(foreground="green")
+                            else:
+                                self.agc_combo.config(foreground="black")
+                        except:
+                            self.agc_combo.config(foreground="black")
 
         except Exception as e:
             print(f"Poll error: {e}")
