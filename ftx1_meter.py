@@ -103,29 +103,30 @@ class FTX1MeterMonitor:
             self.bar_canvases[m] = canvas
             self.smoothed_values[m] = 0.0
 
-        # Right column - Controls
-        ttk.Label(msf, text="Power (W):").grid(row=0, column=2, sticky="e", padx=(8,2), pady=4)
-        self.power_spin = tk.Spinbox(msf, from_=0.5, to=10.0, increment=0.1, textvariable=self.power_var, width=6, command=self.apply_controls)
-        self.power_spin.grid(row=0, column=3, sticky="w", padx=5)
+            # Right column - Controls (Power settable, Preamp/ATT read-only)
+            ttk.Label(msf, text="Power (W):").grid(row=0, column=2, sticky="e", padx=(8, 2), pady=4)
+            self.power_spin = tk.Spinbox(msf, from_=0.5, to=10.0, increment=0.1, textvariable=self.power_var, width=6,
+                                         command=self.apply_controls)
+            self.power_spin.grid(row=0, column=3, sticky="w", padx=5)
 
-        ttk.Label(msf, text="Preamp:").grid(row=1, column=2, sticky="e", padx=(8,2), pady=4)
-        self.preamp_combo = ttk.Combobox(msf, textvariable=self.preamp_var, values=["IPO", "AMP1", "AMP2"], state="readonly", width=8)
-        self.preamp_combo.grid(row=1, column=3, sticky="w", padx=5)
-        self.preamp_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+            ttk.Label(msf, text="Preamp:").grid(row=1, column=2, sticky="e", padx=(8, 2), pady=4)
+            self.preamp_label = ttk.Label(msf, textvariable=self.preamp_var, font=("Arial", 10), width=8, anchor="w")
+            self.preamp_label.grid(row=1, column=3, sticky="w", padx=5)
 
-        ttk.Label(msf, text="ATT:").grid(row=2, column=2, sticky="e", padx=(8,2), pady=4)
-        self.att_combo = ttk.Combobox(msf, textvariable=self.att_var, values=["Off", "-6 dB", "-12 dB", "-18 dB"], state="readonly", width=8)
-        self.att_combo.grid(row=2, column=3, sticky="w", padx=5)
-        self.att_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+            ttk.Label(msf, text="ATT:").grid(row=2, column=2, sticky="e", padx=(8, 2), pady=4)
+            self.att_label = ttk.Label(msf, textvariable=self.att_var, font=("Arial", 10), width=8, anchor="w")
+            self.att_label.grid(row=2, column=3, sticky="w", padx=5)
 
-        ttk.Label(msf, text="Squelch:").grid(row=3, column=2, sticky="e", padx=(8,2), pady=4)
-        self.sql_spin = tk.Spinbox(msf, from_=0.0, to=1.0, increment=0.05, textvariable=self.sql_var, width=6, command=self.apply_controls)
-        self.sql_spin.grid(row=3, column=3, sticky="w", padx=5)
+            ttk.Label(msf, text="Squelch:").grid(row=3, column=2, sticky="e", padx=(8, 2), pady=4)
+            self.sql_spin = tk.Spinbox(msf, from_=0.0, to=1.0, increment=0.05, textvariable=self.sql_var, width=6,
+                                       command=self.apply_controls)
+            self.sql_spin.grid(row=3, column=3, sticky="w", padx=5)
 
-        ttk.Label(msf, text="AGC:").grid(row=4, column=2, sticky="e", padx=(8,2), pady=4)
-        self.agc_combo = ttk.Combobox(msf, textvariable=self.agc_var, values=["Off", "Fast", "Medium", "Slow", "Auto"], state="readonly", width=10)
-        self.agc_combo.grid(row=4, column=3, sticky="w", padx=5)
-        self.agc_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+            ttk.Label(msf, text="AGC:").grid(row=4, column=2, sticky="e", padx=(8, 2), pady=4)
+            self.agc_combo = ttk.Combobox(msf, textvariable=self.agc_var,
+                                          values=["Off", "Fast", "Medium", "Slow", "Auto"], state="readonly", width=10)
+            self.agc_combo.grid(row=4, column=3, sticky="w", padx=5)
+            self.agc_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
     def sync_controls_from_radio(self):
         if not self.sock:
@@ -208,33 +209,26 @@ class FTX1MeterMonitor:
             self.status_var.set("Not connected")
             return
 
-        self.ignore_readback_until = time.time() + 12.0  # Ignore for 12 seconds after change
-        self.status_var.set("Changes applied - waiting 12s for radio to confirm...")
+        self.ignore_readback_until = time.time() + 12.0
 
+        # Power
         power_w = self.power_var.get()
         power_raw = power_w / 100.0
         self.rig_cmd(f"L RFPOWER {power_raw:.4f}")
         self.last_set["power"] = power_raw
 
-        preamp_map = {"IPO": 0, "AMP1": 1, "AMP2": 2}
-        preamp_val = preamp_map.get(self.preamp_var.get(), 0)
-        self.rig_cmd(f"L PREAMP {preamp_val}")
-        self.last_set["preamp"] = preamp_val
-
-        att_map = {"Off": 0, "-6 dB": 6, "-12 dB": 12, "-18 dB": 18}
-        att_val = att_map.get(self.att_var.get(), 0)
-        self.rig_cmd(f"L ATT {att_val}")
-        self.last_set["att"] = att_val
-
+        # Squelch
         sql_val = self.sql_var.get()
         self.rig_cmd(f"L SQL {sql_val:.2f}")
         self.last_set["sql"] = sql_val
 
+        # AGC
         agc_map = {"Off": 0, "Fast": 1, "Medium": 2, "Slow": 3, "Auto": 6}
         agc_val = agc_map.get(self.agc_var.get(), 0)
         self.rig_cmd(f"L AGC {agc_val}")
         self.last_set["agc"] = agc_val
 
+        # Mode + PRESET
         if self.preset_var.get():
             self.rig_cmd("X")
         mode_str = self.mode_var.get()
