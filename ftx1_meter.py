@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-FTX-1 Meter Monitor v1.2 - Clean fresh start
-Layout: top status (Freq + Mode + PRESET), left meters with bars, right controls
-Preamp/ATT read-only, Power/Squelch/AGC/Mode settable
+FTX-1 Meter Monitor v1.2 - Final stable version
+All meters (including COMP, VDD, ID), read-only Preamp/ATT, settable Squelch/AGC/Mode
+Layout matches v1.1.5 stable version
 Startup sync from radio, no snap-back, green confirmation on settable items
 """
 
@@ -43,7 +43,7 @@ class FTX1MeterMonitor:
         self.mode_var = tk.StringVar()
         self.preset_var = tk.BooleanVar(value=False)
 
-        # Track last set values for green confirmation
+        # Track last set values for green confirmation (only on settable items)
         self.last_set = {}
 
         # Ignore read-back override after change
@@ -76,13 +76,13 @@ class FTX1MeterMonitor:
         self.preset_check = ttk.Checkbutton(mode_frame, text="PRESET", variable=self.preset_var, command=self.apply_controls)
         self.preset_check.pack(side="left", padx=8)
 
-        # Meters / Status frame
+        # Meters / Status frame (left meters + right controls)
         msf = ttk.LabelFrame(self.root, text="Meters / Status")
         msf.pack(fill="both", expand=True, padx=10, pady=6)
         msf.columnconfigure(0, weight=1)
         msf.columnconfigure(2, weight=1)
 
-        # Left column - Meters
+        # Left column - Meters (all included)
         pretty_left = {
             "STRENGTH": "S-Meter",
             "RFPOWER_METER": "PO",
@@ -106,8 +106,8 @@ class FTX1MeterMonitor:
 
         # Right column - Controls
         ttk.Label(msf, text="Power (W):").grid(row=0, column=2, sticky="e", padx=(8,2), pady=4)
-        self.power_spin = tk.Spinbox(msf, from_=0.5, to=10.0, increment=0.1, textvariable=self.power_var, width=6, command=self.apply_controls)
-        self.power_spin.grid(row=0, column=3, sticky="w", padx=5)
+        self.power_label = ttk.Label(msf, textvariable=self.power_var, font=("Arial", 11, "bold"), width=12, anchor="w")
+        self.power_label.grid(row=0, column=3, sticky="w", padx=5)
 
         ttk.Label(msf, text="Preamp:").grid(row=1, column=2, sticky="e", padx=(8,2), pady=4)
         self.preamp_label = ttk.Label(msf, textvariable=self.preamp_var, font=("Arial", 10), width=8, anchor="w")
@@ -208,11 +208,6 @@ class FTX1MeterMonitor:
             return
 
         self.ignore_readback_until = time.time() + 12.0
-
-        power_w = self.power_var.get()
-        power_raw = power_w / 100.0
-        self.rig_cmd(f"L RFPOWER {power_raw:.4f}")
-        self.last_set["power"] = power_raw
 
         sql_val = self.sql_var.get()
         self.rig_cmd(f"L SQL {sql_val:.2f}")
@@ -375,16 +370,6 @@ class FTX1MeterMonitor:
             if time.time() < self.ignore_readback_until:
                 self.status_var.set("Waiting for radio to apply changes...")
             else:
-                pwr_raw = self.rig_cmd("l RFPOWER")
-                if pwr_raw:
-                    try:
-                        raw = float(pwr_raw)
-                        disp_w = raw * 100
-                        self.power_var.set(round(disp_w, 2))
-                        self.power_spin.config(foreground="green" if abs(disp_w - self.last_set["power"] * 100) < 0.5 else "black")
-                    except:
-                        self.power_spin.config(foreground="black")
-
                 preamp_raw = self.rig_cmd("l PREAMP")
                 if preamp_raw:
                     preamp_map_rev = {0: "IPO", 1: "AMP1", 2: "AMP2"}
