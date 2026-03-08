@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-FTX-1 Meter Monitor v1.2.5 - Polling at 1 second, send only on user change
-Read-back is read-only, no sending during polling cycles
+FTX-1 Meter Monitor v1.2.6 - Left meters updated to Hamlib 4.7 supported levels
+Only STRENGTH, RFPOWER, SWR, ALC, COMP (no more RFPOWER_METER/VD_METER/ID_METER)
+Polling at 1s, send only on user change
 """
 
 import tkinter as tk
@@ -17,14 +18,15 @@ class FTX1MeterMonitor:
         self.sock = None
 
         self.root = tk.Tk()
-        self.root.title("FTX-1 Meter Monitor v1.2.5")
-        self.root.geometry("540x520")
+        self.root.title("FTX-1 Meter Monitor v1.2.6")
+        self.root.geometry("540x480")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
 
         self.status_var = tk.StringVar(value=f"Connecting to {host}:{port}...")
 
-        self.left_meters = ["STRENGTH", "RFPOWER_METER", "SWR", "ALC", "COMP_METER", "VD_METER", "ID_METER"]
+        # Only poll supported levels from Hamlib 4.7 (your l ? list)
+        self.left_meters = ["STRENGTH", "RFPOWER", "SWR", "ALC", "COMP"]
         self.meter_labels = {}
         self.bar_canvases = {}
         self.smoothed_values = {}
@@ -78,18 +80,18 @@ class FTX1MeterMonitor:
         msf.columnconfigure(0, weight=1)
         msf.columnconfigure(2, weight=1)
 
+        # Left column - Meters (only supported levels)
         pretty_left = {
             "STRENGTH": "S-Meter",
-            "RFPOWER_METER": "PO",
+            "RFPOWER": "PO",
             "SWR": "SWR",
             "ALC": "ALC",
-            "COMP_METER": "COMP",
-            "VD_METER": "VDD (V)",
-            "ID_METER": "ID (A)"
+            "COMP": "COMP"
         }
         for i, m in enumerate(self.left_meters):
             row_val = i * 2
-            ttk.Label(msf, text=f"{pretty_left.get(m, m)}:").grid(row=row_val, column=0, sticky="e", padx=(8,2), pady=(6,1))
+            label_text = pretty_left.get(m, m)
+            ttk.Label(msf, text=f"{label_text}:").grid(row=row_val, column=0, sticky="e", padx=(8,2), pady=(6,1))
             var = tk.StringVar(value="—")
             self.meter_labels[m] = var
             ttk.Label(msf, textvariable=var, font=("Arial", 11, "bold"), width=12, anchor="w").grid(row=row_val, column=1, sticky="w", padx=5)
@@ -294,17 +296,13 @@ class FTX1MeterMonitor:
         if not val: return "—"
         try:
             v = float(val)
-            if name == "RFPOWER_METER":
+            if name == "RFPOWER":
                 return f"{v * 10:.1f} W"
             if name == "SWR":
                 return f"{v:.2f}"
             if name == "STRENGTH":
                 return self.format_smeter(val)
-            if name == "ID_METER":
-                return f"{v / 10:.2f} A"
-            if name == "VD_METER":
-                return f"{v:.2f} V"
-            if name == "COMP_METER":
+            if name == "COMP":
                 return f"{v:.1f}"
             return f"{v:.2f}"
         except:
@@ -328,7 +326,7 @@ class FTX1MeterMonitor:
         width = 100
         height = self.bar_height
 
-        if name == "RFPOWER_METER":
+        if name == "RFPOWER":
             pct = min(smoothed, 1.0)
             fill_color = "lime"
         elif name == "SWR":
@@ -354,14 +352,8 @@ class FTX1MeterMonitor:
             if pct > 0.9: fill_color = "red"
             elif pct > 0.7: fill_color = "orange"
             else: fill_color = "lime"
-        elif name == "COMP_METER":
+        elif name == "COMP":
             pct = min(smoothed, 1.0)
-            fill_color = "lime"
-        elif name == "VD_METER":
-            pct = min(smoothed / 20.0, 1.0)
-            fill_color = "lime"
-        elif name == "ID_METER":
-            pct = min(smoothed / 10.0, 1.0)
             fill_color = "lime"
         else:
             pct = 0
@@ -403,7 +395,7 @@ class FTX1MeterMonitor:
 
         if not self.sock:
             self.root.after(3000, self.reconnect)
-            self.root.after(2000, self.update_readings)
+            self.root.after(1000, self.update_readings)
             return
 
         try:
