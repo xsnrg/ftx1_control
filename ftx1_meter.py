@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-FTX-1 Meter Monitor v1.2.5 - Smart polling (only supported levels, less spam)
-Fixed freeze, added reconnect button, debug prints
+FTX-1 Meter Monitor v1.2.5 - Polling at 1 second, send only on user change
+Read-back is read-only, no sending during polling cycles
 """
 
 import tkinter as tk
@@ -32,9 +32,6 @@ class FTX1MeterMonitor:
         self.smoothing_alpha = 0.4
         self.bar_height = 6
 
-        # Supported levels for polling (from dumpcaps + tests)
-        self.supported_levels = ["RFPOWER", "PREAMP", "ATT", "SQL", "AGC", "NR", "NB", "STRENGTH", "SWR", "ALC"]
-
         # Control variables
         self.power_var = tk.DoubleVar()
         self.preamp_var = tk.StringVar()
@@ -53,7 +50,7 @@ class FTX1MeterMonitor:
         self.build_gui()
         self.connect_to_rig()
         self.root.after(800, self.sync_controls_from_radio)
-        self.root.after(2000, self.update_readings)  # Start polling at 2s interval
+        self.root.after(1000, self.update_readings)  # Poll every 1 second
 
     def build_gui(self):
         ttk.Label(self.root, textvariable=self.status_var, font=("Arial", 9)).pack(pady=(8, 4))
@@ -388,13 +385,10 @@ class FTX1MeterMonitor:
             return False
 
     def rig_cmd(self, cmd):
-        if not self.sock:
-            return None
+        if not self.sock: return None
         try:
-            print(f"Sending: {cmd}")
             self.sock.sendall((cmd + "\n").encode('ascii'))
             resp = self.sock.recv(1024).decode('ascii', errors='ignore').strip()
-            print(f"Received: {resp}")
             if "RPRT" in resp:
                 resp = resp.split("RPRT", 1)[0].strip()
             return resp if resp else None
@@ -409,7 +403,7 @@ class FTX1MeterMonitor:
 
         if not self.sock:
             self.root.after(3000, self.reconnect)
-            self.root.after(500, self.update_readings)
+            self.root.after(2000, self.update_readings)
             return
 
         try:
@@ -433,14 +427,10 @@ class FTX1MeterMonitor:
                     self.filter_var.set("—")
 
             for name in self.left_meters:
-                if name in self.supported_levels or name == "RFPOWER_METER":
-                    val = self.rig_cmd(f"l {name}")
-                    display_val = self.format_value(name, val)
-                    self.meter_labels[name].set(display_val)
-                    self.update_progress_bar(name, val)
-                else:
-                    self.meter_labels[name].set("— (unsupported)")
-                    self.update_progress_bar(name, "0")
+                val = self.rig_cmd(f"l {name}")
+                display_val = self.format_value(name, val)
+                self.meter_labels[name].set(display_val)
+                self.update_progress_bar(name, val)
 
             # Read-back for controls - skip if recently changed
             if time.time() < self.ignore_readback_until:
@@ -452,7 +442,7 @@ class FTX1MeterMonitor:
                         raw = float(pwr_raw)
                         disp_w = raw * 10
                         self.power_var.set(round(disp_w, 1))
-                        self.power_spin.config(foreground="green" if abs(disp_w - self.last_set["power"] * 10) < 0.5 else "black")
+                        self.power_spin.config(foreground="green" if abs(disp_w - self.last_set.get("power", 0) * 10) < 0.5 else "black")
                     except:
                         self.power_spin.config(foreground="black")
 
@@ -522,7 +512,7 @@ class FTX1MeterMonitor:
         else:
             self.status_var.set(f"Connected ✓ ({elapsed:.2f}s)")
 
-        self.root.after(2000, self.update_readings)  # Poll every 2 seconds
+        self.root.after(1000, self.update_readings)  # Poll every 1 second
 
     def reconnect(self):
         self.connect_to_rig()
