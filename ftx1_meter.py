@@ -68,13 +68,26 @@ class FTX1MeterMonitor:
         ttk.Label(sf, textvariable=self.freq_var, font=("Arial", 12, "bold")).grid(row=0, column=1, sticky="w")
 
         ttk.Label(sf, text="Mode:").grid(row=1, column=0, sticky="e", padx=8, pady=3)
+
         mode_frame = ttk.Frame(sf)
         mode_frame.grid(row=1, column=1, sticky="w")
-        mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var, values=["PRESET", "PKTUSB", "PKTLSB", "USB", "LSB", "CW-U", "CW-L", "AM", "FM", "RTTY", "DATA-U", "DATA-L"], state="readonly", width=12)
+
+        # Mode dropdown
+        mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var,
+                                  values=["PRESET", "PKTUSB", "PKTLSB", "USB", "LSB", "CW-U", "CW-L", "AM", "FM",
+                                          "RTTY", "DATA-U", "DATA-L"], state="readonly", width=12)
         mode_combo.pack(side="left")
         mode_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
-        self.preset_check = ttk.Checkbutton(mode_frame, text="PRESET", variable=self.preset_var, command=self.apply_controls)
+
+        # PRESET checkbox
+        self.preset_check = ttk.Checkbutton(mode_frame, text="PRESET", variable=self.preset_var,
+                                            command=self.apply_controls)
         self.preset_check.pack(side="left", padx=8)
+
+        # Filter display (read-only, from polled mode response)
+        ttk.Label(mode_frame, text="Filter:").pack(side="left", padx=(15, 5))
+        self.filter_var = tk.StringVar(value="—")
+        ttk.Label(mode_frame, textvariable=self.filter_var, font=("Arial", 10)).pack(side="left")
 
         # Meters / Status frame (left meters + right controls)
         msf = ttk.LabelFrame(self.root, text="Meters / Status")
@@ -202,6 +215,17 @@ class FTX1MeterMonitor:
             print(f"Startup sync error: {e}")
             self.status_var.set("Partial startup sync")
 
+    def check_preset_success(self, mode_before):
+        """Infer PRESET success by checking if mode/filter changed"""
+        m = self.rig_cmd("m")
+        if m:
+            parts = m.split()
+            mode_now = parts[0] if len(parts) >= 1 else m
+            if mode_now != mode_before:
+                self.status_var.set("PRESET applied (mode changed)")
+            else:
+                self.status_var.set("PRESET may not have applied (no change)")
+
     def apply_controls(self):
         if not self.sock:
             self.status_var.set("Not connected")
@@ -209,23 +233,41 @@ class FTX1MeterMonitor:
 
         self.ignore_readback_until = time.time() + 12.0
 
+        # Power - unchanged
+        power_w = self.power_var.get()
+        power_raw = power_w / 100.0
+        self.rig_cmd(f"L RFPOWER {power_raw:.4f}")
+        self.last_set["power"] = power_raw
+        print(f"Set Power to {power_w:.2f} W (raw {power_raw:.4f})")
+
+        # Squelch - unchanged
         sql_val = self.sql_var.get()
         self.rig_cmd(f"L SQL {sql_val:.2f}")
         self.last_set["sql"] = sql_val
+        print(f"Set Squelch to {sql_val:.2f}")
 
+        # AGC - unchanged
         agc_map = {"Off": 0, "Fast": 1, "Medium": 2, "Slow": 3, "Auto": 6}
         agc_val = agc_map.get(self.agc_var.get(), 0)
         self.rig_cmd(f"L AGC {agc_val}")
         self.last_set["agc"] = agc_val
+        print(f"Set AGC to {self.agc_var.get()} (raw {agc_val})")
 
-        if self.preset_var.get():
-            self.rig_cmd("X")
+        # Mode - unchanged
         mode_str = self.mode_var.get()
         self.rig_cmd(f"M {mode_str} 0")
         self.last_set["mode"] = mode_str
-        self.last_set["preset"] = self.preset_var.get()
+        print(f"Set Mode to {mode_str}")
 
-        self.status_var.set("Changes applied")
+        # PRESET - disabled because "X" command times out in current Hamlib backend
+        # (we keep the checkbox for visibility, but do not send the command)
+        if self.preset_var.get():
+            print("PRESET checkbox checked - command disabled (times out in Hamlib)")
+            self.status_var.set("PRESET not sent - Hamlib backend does not support it yet")
+        else:
+            self.status_var.set("Changes applied")
+
+        self.last_set["preset"] = self.preset_var.get()
 
     def format_smeter(self, raw_str):
         try:
@@ -357,8 +399,20 @@ class FTX1MeterMonitor:
 
             m = self.rig_cmd("m")
             if m:
-                mode_clean = m.split()[0] if " " in m else m
-                self.mode_var.set(mode_clean)
+                parts = m.split()
+                if len(parts) >= 1:
+                    mode_clean = parts[0]  # e.g. PKTUSB
+                    self.mode_var.set(mode_clean)
+                    self.last_set["mode"] = mode_clean
+
+                    if len(parts) >= 2:
+                        filter_val = parts[1]  # e.g. 3000
+                        self.filter_var.set(filter_val + " Hz")
+                    else:
+                        self.filter_var.set("—")
+                else:
+                    self.mode_var.set(m)
+                    self.filter_var.set("—")
 
             for name in self.left_meters:
                 val = self.rig_cmd(f"l {name}")
