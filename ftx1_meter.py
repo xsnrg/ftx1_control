@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-FTX-1 Meter Monitor v1.2 - Final stable version
-All meters (including COMP, VDD, ID), read-only Preamp/ATT, settable Squelch/AGC/Mode
-Layout matches v1.1.5 stable version
-Startup sync from radio, no snap-back, green confirmation on settable items
+FTX-1 Meter Monitor v1.2.5 - Smart polling (only supported levels, less spam)
+Fixed freeze, added reconnect button, debug prints
 """
 
 import tkinter as tk
@@ -19,8 +17,8 @@ class FTX1MeterMonitor:
         self.sock = None
 
         self.root = tk.Tk()
-        self.root.title("FTX-1 Meter Monitor v1.2")
-        self.root.geometry("540x480")
+        self.root.title("FTX-1 Meter Monitor v1.2.5")
+        self.root.geometry("540x520")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
 
@@ -34,35 +32,32 @@ class FTX1MeterMonitor:
         self.smoothing_alpha = 0.4
         self.bar_height = 6
 
-        # Control variables - initialized empty, filled by startup sync
+        # Supported levels for polling (from dumpcaps + tests)
+        self.supported_levels = ["RFPOWER", "PREAMP", "ATT", "SQL", "AGC", "NR", "NB", "STRENGTH", "SWR", "ALC"]
+
+        # Control variables
         self.power_var = tk.DoubleVar()
         self.preamp_var = tk.StringVar()
         self.att_var = tk.StringVar()
         self.sql_var = tk.DoubleVar()
         self.agc_var = tk.StringVar()
-        self.mode_var = tk.StringVar()
-        self.preset_var = tk.BooleanVar(value=False)
         self.nr_var = tk.StringVar()
         self.nb_var = tk.StringVar()
+        self.mode_var = tk.StringVar()
+        self.filter_var = tk.StringVar(value="—")
+        self.preset_var = tk.BooleanVar(value=False)
 
-        # Track last set values for green confirmation (only on settable items)
         self.last_set = {}
-
-        # Ignore read-back override after change
         self.ignore_readback_until = 0.0
 
         self.build_gui()
         self.connect_to_rig()
-
-        # Sync controls from radio after connection
         self.root.after(800, self.sync_controls_from_radio)
-
-        self.root.after(500, self.update_readings)
+        self.root.after(2000, self.update_readings)  # Start polling at 2s interval
 
     def build_gui(self):
         ttk.Label(self.root, textvariable=self.status_var, font=("Arial", 9)).pack(pady=(8, 4))
 
-        # Radio Status (top)
         sf = ttk.LabelFrame(self.root, text="Radio Status")
         sf.pack(fill="x", padx=10, pady=5)
         self.freq_var = tk.StringVar(value="—")
@@ -70,34 +65,22 @@ class FTX1MeterMonitor:
         ttk.Label(sf, textvariable=self.freq_var, font=("Arial", 12, "bold")).grid(row=0, column=1, sticky="w")
 
         ttk.Label(sf, text="Mode:").grid(row=1, column=0, sticky="e", padx=8, pady=3)
-
         mode_frame = ttk.Frame(sf)
         mode_frame.grid(row=1, column=1, sticky="w")
-
-        # Mode dropdown
-        mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var,
-                                  values=["PRESET", "PKTUSB", "PKTLSB", "USB", "LSB", "CW-U", "CW-L", "AM", "FM",
-                                          "RTTY", "DATA-U", "DATA-L"], state="readonly", width=12)
+        mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var, values=["PRESET", "PKTUSB", "PKTLSB", "USB", "LSB", "CW-U", "CW-L", "AM", "FM", "RTTY", "DATA-U", "DATA-L"], state="readonly", width=12)
         mode_combo.pack(side="left")
         mode_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
-
-        # PRESET checkbox
-        self.preset_check = ttk.Checkbutton(mode_frame, text="PRESET", variable=self.preset_var,
-                                            command=self.apply_controls)
+        self.preset_check = ttk.Checkbutton(mode_frame, text="PRESET", variable=self.preset_var, command=self.apply_controls)
         self.preset_check.pack(side="left", padx=8)
 
-        # Filter display (read-only, from polled mode response)
-        ttk.Label(mode_frame, text="Filter:").pack(side="left", padx=(15, 5))
-        self.filter_var = tk.StringVar(value="—")
+        ttk.Label(mode_frame, text="Filter:").pack(side="left", padx=(15,5))
         ttk.Label(mode_frame, textvariable=self.filter_var, font=("Arial", 10)).pack(side="left")
 
-        # Meters / Status frame (left meters + right controls)
         msf = ttk.LabelFrame(self.root, text="Meters / Status")
         msf.pack(fill="both", expand=True, padx=10, pady=6)
         msf.columnconfigure(0, weight=1)
         msf.columnconfigure(2, weight=1)
 
-        # Left column - Meters (all included)
         pretty_left = {
             "STRENGTH": "S-Meter",
             "RFPOWER_METER": "PO",
@@ -121,16 +104,18 @@ class FTX1MeterMonitor:
 
         # Right column - Controls
         ttk.Label(msf, text="Power (W):").grid(row=0, column=2, sticky="e", padx=(8,2), pady=4)
-        self.power_label = ttk.Label(msf, textvariable=self.power_var, font=("Arial", 11, "bold"), width=12, anchor="w")
-        self.power_label.grid(row=0, column=3, sticky="w", padx=5)
+        self.power_spin = tk.Spinbox(msf, from_=0.5, to=10.0, increment=0.1, textvariable=self.power_var, width=6, command=self.apply_controls)
+        self.power_spin.grid(row=0, column=3, sticky="w", padx=5)
 
         ttk.Label(msf, text="Preamp:").grid(row=1, column=2, sticky="e", padx=(8,2), pady=4)
-        self.preamp_label = ttk.Label(msf, textvariable=self.preamp_var, font=("Arial", 10), width=8, anchor="w")
-        self.preamp_label.grid(row=1, column=3, sticky="w", padx=5)
+        self.preamp_combo = ttk.Combobox(msf, textvariable=self.preamp_var, values=["IPO", "AMP1", "AMP2"], state="readonly", width=8)
+        self.preamp_combo.grid(row=1, column=3, sticky="w", padx=5)
+        self.preamp_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
         ttk.Label(msf, text="ATT:").grid(row=2, column=2, sticky="e", padx=(8,2), pady=4)
-        self.att_label = ttk.Label(msf, textvariable=self.att_var, font=("Arial", 10), width=8, anchor="w")
-        self.att_label.grid(row=2, column=3, sticky="w", padx=5)
+        self.att_combo = ttk.Combobox(msf, textvariable=self.att_var, values=["Off", "-6 dB", "-12 dB", "-18 dB"], state="readonly", width=8)
+        self.att_combo.grid(row=2, column=3, sticky="w", padx=5)
+        self.att_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
         ttk.Label(msf, text="Squelch:").grid(row=3, column=2, sticky="e", padx=(8,2), pady=4)
         self.sql_spin = tk.Spinbox(msf, from_=0.0, to=1.0, increment=0.05, textvariable=self.sql_var, width=6, command=self.apply_controls)
@@ -141,19 +126,19 @@ class FTX1MeterMonitor:
         self.agc_combo.grid(row=4, column=3, sticky="w", padx=5)
         self.agc_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
-        ttk.Label(msf, text="Reduction (NR) :").grid(row=5, column=2, sticky="e", padx=(8, 2), pady=4)
-        self.nr_combo = ttk.Combobox(msf, textvariable=self.nr_var,
-                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly",
-                                     width=8)
+        ttk.Label(msf, text="Noise Red. (NR):").grid(row=5, column=2, sticky="e", padx=(8,2), pady=4)
+        self.nr_combo = ttk.Combobox(msf, textvariable=self.nr_var, values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly", width=8)
         self.nr_combo.grid(row=5, column=3, sticky="w", padx=5)
         self.nr_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
-        ttk.Label(msf, text="Blanker (NB):").grid(row=6, column=2, sticky="e", padx=(8, 2), pady=4)
-        self.nb_combo = ttk.Combobox(msf, textvariable=self.nb_var,
-                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly",
-                                     width=8)
+        ttk.Label(msf, text="Noise Bl. (NB):").grid(row=6, column=2, sticky="e", padx=(8,2), pady=4)
+        self.nb_combo = ttk.Combobox(msf, textvariable=self.nb_var, values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly", width=8)
         self.nb_combo.grid(row=6, column=3, sticky="w", padx=5)
         self.nb_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+
+        # Reconnect button
+        reconnect_btn = ttk.Button(self.root, text="Reconnect", command=self.reconnect)
+        reconnect_btn.pack(pady=10)
 
     def sync_controls_from_radio(self):
         if not self.sock:
@@ -166,8 +151,8 @@ class FTX1MeterMonitor:
             if pwr_raw:
                 try:
                     raw = float(pwr_raw)
-                    disp_w = raw * 100
-                    self.power_var.set(round(disp_w, 2))
+                    disp_w = raw * 10
+                    self.power_var.set(round(disp_w, 1))
                     self.last_set["power"] = raw
                     success += 1
                 except:
@@ -219,7 +204,7 @@ class FTX1MeterMonitor:
             if nr_raw:
                 try:
                     raw_nr = float(nr_raw)
-                    nr_level = round(raw_nr * 9)  # 0.0-1.0 → 0-9
+                    nr_level = round(raw_nr * 9)
                     self.nr_var.set(str(nr_level))
                     self.last_set["nr"] = nr_level
                     success += 1
@@ -238,9 +223,18 @@ class FTX1MeterMonitor:
 
             m = self.rig_cmd("m")
             if m:
-                mode_clean = m.split()[0] if " " in m else m
-                self.mode_var.set(mode_clean)
-                self.last_set["mode"] = mode_clean
+                parts = m.split()
+                if len(parts) >= 1:
+                    mode_clean = parts[0]
+                    self.mode_var.set(mode_clean)
+
+                    if len(parts) >= 2:
+                        self.filter_var.set(parts[1] + " Hz")
+                    else:
+                        self.filter_var.set("—")
+                else:
+                    self.mode_var.set(m)
+                    self.filter_var.set("—")
                 success += 1
 
             self.preset_var.set(False)
@@ -252,17 +246,6 @@ class FTX1MeterMonitor:
             print(f"Startup sync error: {e}")
             self.status_var.set("Partial startup sync")
 
-    def check_preset_success(self, mode_before):
-        """Infer PRESET success by checking if mode/filter changed"""
-        m = self.rig_cmd("m")
-        if m:
-            parts = m.split()
-            mode_now = parts[0] if len(parts) >= 1 else m
-            if mode_now != mode_before:
-                self.status_var.set("PRESET applied (mode changed)")
-            else:
-                self.status_var.set("PRESET may not have applied (no change)")
-
     def apply_controls(self):
         if not self.sock:
             self.status_var.set("Not connected")
@@ -270,29 +253,23 @@ class FTX1MeterMonitor:
 
         self.ignore_readback_until = time.time() + 12.0
 
-        # Power - unchanged
         power_w = self.power_var.get()
-        power_raw = power_w / 100.0
+        power_raw = power_w / 10.0
         self.rig_cmd(f"L RFPOWER {power_raw:.4f}")
         self.last_set["power"] = power_raw
-        print(f"Set Power to {power_w:.2f} W (raw {power_raw:.4f})")
 
-        # Squelch - unchanged
         sql_val = self.sql_var.get()
         self.rig_cmd(f"L SQL {sql_val:.2f}")
         self.last_set["sql"] = sql_val
-        print(f"Set Squelch to {sql_val:.2f}")
 
-        # AGC - unchanged
         agc_map = {"Off": 0, "Fast": 1, "Medium": 2, "Slow": 3, "Auto": 6}
         agc_val = agc_map.get(self.agc_var.get(), 0)
         self.rig_cmd(f"L AGC {agc_val}")
         self.last_set["agc"] = agc_val
-        print(f"Set AGC to {self.agc_var.get()} (raw {agc_val})")
 
         nr_display = self.nr_var.get()
         nr_val = 0 if nr_display == "Off" else int(nr_display)
-        self.rig_cmd(f"L NR {nr_val / 9.0:.2f}")  # send normalized 0.0-1.0
+        self.rig_cmd(f"L NR {nr_val / 9.0:.2f}")
         self.last_set["nr"] = nr_val
 
         nb_display = self.nb_var.get()
@@ -300,21 +277,14 @@ class FTX1MeterMonitor:
         self.rig_cmd(f"L NB {nb_val}")
         self.last_set["nb"] = nb_val
 
-        # Mode - unchanged
+        if self.preset_var.get():
+            self.rig_cmd("X")
         mode_str = self.mode_var.get()
         self.rig_cmd(f"M {mode_str} 0")
         self.last_set["mode"] = mode_str
-        print(f"Set Mode to {mode_str}")
-
-        # PRESET - disabled because "X" command times out in current Hamlib backend
-        # (we keep the checkbox for visibility, but do not send the command)
-        if self.preset_var.get():
-            print("PRESET checkbox checked - command disabled (times out in Hamlib)")
-            self.status_var.set("PRESET not sent - Hamlib backend does not support it yet")
-        else:
-            self.status_var.set("Changes applied")
-
         self.last_set["preset"] = self.preset_var.get()
+
+        self.status_var.set("Changes applied")
 
     def format_smeter(self, raw_str):
         try:
@@ -408,7 +378,7 @@ class FTX1MeterMonitor:
         try:
             if self.sock: self.sock.close()
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.settimeout(3.0)
+            self.sock.settimeout(5.0)
             self.sock.connect((self.host, self.port))
             self.status_var.set("Connected ✓")
             return True
@@ -418,10 +388,13 @@ class FTX1MeterMonitor:
             return False
 
     def rig_cmd(self, cmd):
-        if not self.sock: return None
+        if not self.sock:
+            return None
         try:
+            print(f"Sending: {cmd}")
             self.sock.sendall((cmd + "\n").encode('ascii'))
             resp = self.sock.recv(1024).decode('ascii', errors='ignore').strip()
+            print(f"Received: {resp}")
             if "RPRT" in resp:
                 resp = resp.split("RPRT", 1)[0].strip()
             return resp if resp else None
@@ -448,13 +421,11 @@ class FTX1MeterMonitor:
             if m:
                 parts = m.split()
                 if len(parts) >= 1:
-                    mode_clean = parts[0]  # e.g. PKTUSB
+                    mode_clean = parts[0]
                     self.mode_var.set(mode_clean)
-                    self.last_set["mode"] = mode_clean
 
                     if len(parts) >= 2:
-                        filter_val = parts[1]  # e.g. 3000
-                        self.filter_var.set(filter_val + " Hz")
+                        self.filter_var.set(parts[1] + " Hz")
                     else:
                         self.filter_var.set("—")
                 else:
@@ -462,24 +433,38 @@ class FTX1MeterMonitor:
                     self.filter_var.set("—")
 
             for name in self.left_meters:
-                val = self.rig_cmd(f"l {name}")
-                display_val = self.format_value(name, val)
-                self.meter_labels[name].set(display_val)
-                self.update_progress_bar(name, val)
+                if name in self.supported_levels or name == "RFPOWER_METER":
+                    val = self.rig_cmd(f"l {name}")
+                    display_val = self.format_value(name, val)
+                    self.meter_labels[name].set(display_val)
+                    self.update_progress_bar(name, val)
+                else:
+                    self.meter_labels[name].set("— (unsupported)")
+                    self.update_progress_bar(name, "0")
 
             # Read-back for controls - skip if recently changed
             if time.time() < self.ignore_readback_until:
                 self.status_var.set("Waiting for radio to apply changes...")
             else:
+                pwr_raw = self.rig_cmd("l RFPOWER")
+                if pwr_raw:
+                    try:
+                        raw = float(pwr_raw)
+                        disp_w = raw * 10
+                        self.power_var.set(round(disp_w, 1))
+                        self.power_spin.config(foreground="green" if abs(disp_w - self.last_set["power"] * 10) < 0.5 else "black")
+                    except:
+                        self.power_spin.config(foreground="black")
+
                 preamp_raw = self.rig_cmd("l PREAMP")
                 if preamp_raw:
                     preamp_map_rev = {0: "IPO", 1: "AMP1", 2: "AMP2"}
                     try:
                         disp = preamp_map_rev.get(int(float(preamp_raw)), "IPO")
                         self.preamp_var.set(disp)
-                        self.preamp_label.config(foreground="green" if disp == self.preamp_var.get() else "black")
+                        self.preamp_combo.config(foreground="green" if disp == self.preamp_var.get() else "black")
                     except:
-                        self.preamp_label.config(foreground="black")
+                        self.preamp_combo.config(foreground="black")
 
                 att_raw = self.rig_cmd("l ATT")
                 if att_raw:
@@ -487,9 +472,9 @@ class FTX1MeterMonitor:
                     try:
                         disp = att_map_rev.get(int(float(att_raw)), "Off")
                         self.att_var.set(disp)
-                        self.att_label.config(foreground="green" if disp == self.att_var.get() else "black")
+                        self.att_combo.config(foreground="green" if disp == self.att_var.get() else "black")
                     except:
-                        self.att_label.config(foreground="black")
+                        self.att_combo.config(foreground="black")
 
                 sql_raw = self.rig_cmd("l SQL")
                 if sql_raw:
@@ -537,10 +522,11 @@ class FTX1MeterMonitor:
         else:
             self.status_var.set(f"Connected ✓ ({elapsed:.2f}s)")
 
-        self.root.after(500, self.update_readings)
+        self.root.after(2000, self.update_readings)  # Poll every 2 seconds
 
     def reconnect(self):
         self.connect_to_rig()
+        self.status_var.set("Reconnecting...")
 
     def quit_app(self):
         if self.sock: self.sock.close()
