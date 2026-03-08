@@ -2,22 +2,36 @@
 
 # FTX-1 Meter Monitor
 
-A simple, lightweight Python/Tkinter application for monitoring and controlling the Yaesu FTX-1 transceiver using Hamlib's NET rigctl (rigctld-wsjtx).
+A lightweight, real-time monitoring and control application for the Yaesu FTX-1 transceiver using Hamlib's NET rigctl (via `rigctld-wsjtx`).
 
-Features:
-- Real-time meters: S-Meter (dB), PO (W), SWR, ALC, COMP, VDD (V), ID (A)
-- Thin horizontal progress bars with color thresholds
-- EMA smoothing for stable readings
-- Controls: Power (0.5–10.0 W), Preamp (IPO/AMP1/AMP2), ATT (Off/-6/-12/-18 dB), Squelch (0–1), AGC (Off/Fast/Medium/Slow/Auto), Mode + PRESET
-- Startup sync: reads current radio settings (no overwrite)
-- Auto-apply on change, green confirmation on read-back match
+This tool is designed for Linux users (tested on Fedora) who run WSJT-X or other ham software and want a clean, dedicated meter panel for S-Meter, PO, SWR, ALC, COMP, VDD, and ID — plus basic control over settable parameters.
 
+### Features
+
+- Real-time meters with thin horizontal progress bars (S-Meter in dB, PO in W, SWR, ALC, COMP, VDD, ID)
+- EMA smoothing for stable, flicker-free readings
+- Startup sync — reads current radio settings on launch (no overwriting)
+- Right-column controls for:
+  - Power (read-only display — set not yet supported by Hamlib backend)
+  - Preamp (read-only: IPO / AMP1 / AMP2)
+  - ATT (read-only: Off / -6 / -12 / -18 dB)
+  - Squelch (settable 0.0–1.0)
+  - AGC (settable: Off / Fast / Medium / Slow / Auto)
+  - NR (Noise Reduction) — settable 0–9
+  - NB (Noise Blanker) — settable 0–9
+  - Mode selector + PRESET checkbox (settable)
+- Green text confirmation when polled value matches last set (on settable items)
+- Auto-apply on change, 12-second ignore timer to prevent snap-back
+- Remote capable — works over LAN/Internet as long as rigctld is running
 
 ### Requirements
 
-- Python 3 (3.12+ recommended)
-- Tkinter: `sudo dnf install python3-tkinter` (Fedora)
-- Hamlib: WSJT-X bundled `rigctld-wsjtx` or system `hamlib` package
+- Python 3.9+ (tested on 3.12)
+- Tkinter (Fedora: `sudo dnf install python3-tkinter`)
+- Hamlib with WSJT-X bundled rigctld-wsjtx (or system hamlib package) >= 4.7
+- Yaesu FTX-1 connected via USB (CAT port)
+
+No external pip packages needed.
 
 ### Usage
 
@@ -30,15 +44,23 @@ rigctld-wsjtx -m 1051 -r /dev/ttyUSB0 -s 38400 -t 4532 &
 python3 ftx1_meter.py
 ```
 
-### Future enhancements
+### Known Limitations
 
-- TX detect (poll PTT or watch PO > 0.1 W) to highlight TX meters
-- Graphical gauges (circular for S-meter, vertical for PO/SWR/ALC)
-- Smoothing on text values (EMA on all meters)
-- CSV logging (power/SWR/ALC over time, on TX or manual)
-- Config file (save host/port, window position, default settings)
-- Better AGC/preamp mapping (verify exact values from FTX-1 CAT manual)
-- Tooltips & help labels for controls
-- Error handling & reconnect button polish
-- Packaging (Flatpak/AppImage for easier distribution)
+Power setting is read-only (Hamlib FTX-1 backend does not yet support L RFPOWER reliably)
+Preamp and ATT are read-only (set commands return "Invalid parameter")
+PRESET command (X) times out — not currently functional
+Some levels may have scaling quirks due to early Hamlib support for FTX-1
 
+### Future Enhancements (planned / ideas)
+
+TX detect (highlight TX meters when PO > 0.1 W)
+Graphical gauges (circular S-meter, vertical PO/SWR)
+CSV logging of TX metrics (power/SWR/ALC over time)
+Config file (host/port, window position, defaults)
+Tooltips & help labels for controls
+Error handling polish (reconnect button, status icons)
+
+
+### Contributing
+Bug reports, feature requests, pull requests welcome!
+Especially welcome: Hamlib backend improvements for FTX-1 write support (PREAMP, ATT, RFPOWER set).
