@@ -42,6 +42,8 @@ class FTX1MeterMonitor:
         self.agc_var = tk.StringVar()
         self.mode_var = tk.StringVar()
         self.preset_var = tk.BooleanVar(value=False)
+        self.nr_var = tk.StringVar()
+        self.nb_var = tk.StringVar()
 
         # Track last set values for green confirmation (only on settable items)
         self.last_set = {}
@@ -139,6 +141,20 @@ class FTX1MeterMonitor:
         self.agc_combo.grid(row=4, column=3, sticky="w", padx=5)
         self.agc_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
+        ttk.Label(msf, text="Reduction (NR) :").grid(row=5, column=2, sticky="e", padx=(8, 2), pady=4)
+        self.nr_combo = ttk.Combobox(msf, textvariable=self.nr_var,
+                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly",
+                                     width=8)
+        self.nr_combo.grid(row=5, column=3, sticky="w", padx=5)
+        self.nr_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+
+        ttk.Label(msf, text="Blanker (NB):").grid(row=6, column=2, sticky="e", padx=(8, 2), pady=4)
+        self.nb_combo = ttk.Combobox(msf, textvariable=self.nb_var,
+                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly",
+                                     width=8)
+        self.nb_combo.grid(row=6, column=3, sticky="w", padx=5)
+        self.nb_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+
     def sync_controls_from_radio(self):
         if not self.sock:
             self.status_var.set("Cannot sync - not connected")
@@ -199,6 +215,27 @@ class FTX1MeterMonitor:
                 except:
                     pass
 
+            nr_raw = self.rig_cmd("l NR")
+            if nr_raw:
+                try:
+                    raw_nr = float(nr_raw)
+                    nr_level = round(raw_nr * 9)  # 0.0-1.0 → 0-9
+                    self.nr_var.set(str(nr_level))
+                    self.last_set["nr"] = nr_level
+                    success += 1
+                except:
+                    self.nr_var.set("Off")
+
+            nb_raw = self.rig_cmd("l NB")
+            if nb_raw:
+                try:
+                    nb_level = int(float(nb_raw))
+                    self.nb_var.set(str(nb_level))
+                    self.last_set["nb"] = nb_level
+                    success += 1
+                except:
+                    self.nb_var.set("Off")
+
             m = self.rig_cmd("m")
             if m:
                 mode_clean = m.split()[0] if " " in m else m
@@ -209,7 +246,7 @@ class FTX1MeterMonitor:
             self.preset_var.set(False)
             self.last_set["preset"] = False
 
-            self.status_var.set(f"Startup sync: {success}/6 settings read")
+            self.status_var.set(f"Startup sync: {success}/8 settings read")
 
         except Exception as e:
             print(f"Startup sync error: {e}")
@@ -252,6 +289,16 @@ class FTX1MeterMonitor:
         self.rig_cmd(f"L AGC {agc_val}")
         self.last_set["agc"] = agc_val
         print(f"Set AGC to {self.agc_var.get()} (raw {agc_val})")
+
+        nr_display = self.nr_var.get()
+        nr_val = 0 if nr_display == "Off" else int(nr_display)
+        self.rig_cmd(f"L NR {nr_val / 9.0:.2f}")  # send normalized 0.0-1.0
+        self.last_set["nr"] = nr_val
+
+        nb_display = self.nb_var.get()
+        nb_val = 0 if nb_display == "Off" else int(nb_display)
+        self.rig_cmd(f"L NB {nb_val}")
+        self.last_set["nb"] = nb_val
 
         # Mode - unchanged
         mode_str = self.mode_var.get()
@@ -461,6 +508,25 @@ class FTX1MeterMonitor:
                         self.agc_combo.config(foreground="green" if disp == self.agc_var.get() else "black")
                     except:
                         self.agc_combo.config(foreground="black")
+
+                nr_raw = self.rig_cmd("l NR")
+                if nr_raw:
+                    try:
+                        raw_nr = float(nr_raw)
+                        nr_level = round(raw_nr * 9)
+                        self.nr_var.set(str(nr_level))
+                        self.nr_combo.config(foreground="green" if nr_level == self.last_set.get("nr", 0) else "black")
+                    except:
+                        self.nr_combo.config(foreground="black")
+
+                nb_raw = self.rig_cmd("l NB")
+                if nb_raw:
+                    try:
+                        nb_level = int(float(nb_raw))
+                        self.nb_var.set(str(nb_level))
+                        self.nb_combo.config(foreground="green" if nb_level == self.last_set.get("nb", 0) else "black")
+                    except:
+                        self.nb_combo.config(foreground="black")
 
         except Exception as e:
             print(f"Poll error: {e}")
