@@ -2,7 +2,7 @@
 
 # FTX-1 Meter Monitor
 
-A lightweight, real-time monitoring and control application for the Yaesu FTX-1 transceiver using Hamlib's NET rigctl (via `rigctld-wsjtx`).
+A lightweight, real-time monitoring and control application for the Yaesu FTX-1 transceiver using Hamlib's NET rigctl (via `rigctld`).
 
 This tool is designed for Linux users (tested on Fedora) who run WSJT-X or other ham software and want a clean, dedicated meter panel for S-Meter, PO, SWR, ALC, COMP, VDD, and ID — plus basic control over settable parameters.
 
@@ -28,17 +28,17 @@ This tool is designed for Linux users (tested on Fedora) who run WSJT-X or other
 
 - Python 3.9+ (tested on 3.12)
 - Tkinter (Fedora: `sudo dnf install python3-tkinter`)
-- Hamlib with WSJT-X bundled rigctld-wsjtx (or system hamlib package) >= 4.7
+- Hamlib with WSJT-X bundled rigctld (or system hamlib package) >= 4.7
 - Yaesu FTX-1 connected via USB (CAT port)
 
 No external pip packages needed.
 
 ### Usage
 
-To start rigctld-wsjtx (example):
+To start rigctld (example):
 
 ```bash
-rigctld-wsjtx -m 1051 -r /dev/ttyUSB0 -s 38400 -t 4532 &
+rigctld -m 1051 -r /dev/ttyUSB0 -s 38400 -t 4532 &
 ```
 ```bash
 python3 ftx1_meter.py
