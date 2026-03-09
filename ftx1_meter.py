@@ -496,15 +496,12 @@ class FTX1MeterMonitor:
                 self.mode_var.set(parts[0] if parts else "—")
                 self.filter_var.set(parts[1] + " Hz" if len(parts) > 1 else "—")
 
-            # --- 2. Control readback (skip right after user change) ---
             if time.time() >= self.ignore_readback_until:
-                self._sync_controls_from_radio()          # your existing sync logic (kept separate)
+                self._perform_control_sync()
 
-            # --- 3. TX detection (much more reliable than old l RFPOWER) ---
             po_raw = self.get_raw_meter(5)                # RM5 = PO
             is_tx = po_raw > 8                            # ~3% of scale = transmitting
 
-            # --- 4. All meters (uniform, clean, ID now works) ---
             for name, cfg in self.left_meters.items():
                 if cfg.get("tx_only", False) and not is_tx:
                     self.update_meter_gui(name, 0.0)
