@@ -11,6 +11,7 @@ import socket
 import sys
 import time
 
+
 class FTX1MeterMonitor:
     def __init__(self, host="localhost", port=4532):
         self.host = host
@@ -18,23 +19,32 @@ class FTX1MeterMonitor:
         self.sock = None
 
         self.root = tk.Tk()
-        self.root.title("FTX-1 Meter Monitor v1.2.6")
+        self.root.title("FTX-1 Meter Monitor v1.3 - Raw RM Meters")
         self.root.geometry("540x480")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
 
         self.status_var = tk.StringVar(value=f"Connecting to {host}:{port}...")
 
-        # Only poll supported levels from Hamlib 4.7 (your l ? list)
-        self.left_meters = ["STRENGTH", "RFPOWER", "SWR", "ALC", "COMP"]
+        # Raw RM meters using correct Yaesu CAT codes (bypasses Hamlib bug)
+        self.left_meters = {
+            "STRENGTH": {"rm": 1, "scale": lambda r: r / 2.55, "tx_only": False, "fmt": "{:.0f} dB", "max": 100},
+            "PO":       {"rm": 5, "scale": lambda r: r / 2.55, "tx_only": True,  "fmt": "{:.1f} W",  "max": 100},
+            "SWR":      {"rm": 6, "scale": lambda r: 1.0 + (r / 50.0), "tx_only": True, "fmt": "{:.2f}:1", "max": 5.0},
+            "ALC":      {"rm": 4, "scale": lambda r: min(r / 25.5, 10.0), "tx_only": True, "fmt": "{:.1f}", "max": 10.0},
+            "COMP":     {"rm": 3, "scale": lambda r: r / 2.55, "tx_only": True,  "fmt": "{:.0f}%", "max": 100},
+            "VDD":      {"rm": 8, "scale": lambda r: r / 15, "tx_only": False, "fmt": "{:.1f} V", "max": 15.0},
+            "ID":       {"rm": 7, "scale": lambda r: r / 25.5, "tx_only": True,  "fmt": "{:.1f} A", "max": 10.0},
+        }
+
         self.meter_labels = {}
         self.bar_canvases = {}
-        self.smoothed_values = {}
+        self.smoothed_values = {k: 0.0 for k in self.left_meters}
 
-        self.smoothing_alpha = 0.4
+        self.smoothing_alpha = 0.2
         self.bar_height = 6
 
-        # Control variables
+        # Your original control variables (unchanged)
         self.power_var = tk.DoubleVar()
         self.preamp_var = tk.StringVar()
         self.att_var = tk.StringVar()
@@ -52,7 +62,7 @@ class FTX1MeterMonitor:
         self.build_gui()
         self.connect_to_rig()
         self.root.after(800, self.sync_controls_from_radio)
-        self.root.after(1000, self.update_readings)  # Poll every 1 second
+        self.root.after(1000, self.update_readings)
 
     def build_gui(self):
         ttk.Label(self.root, textvariable=self.status_var, font=("Arial", 9)).pack(pady=(8, 4))
@@ -66,13 +76,16 @@ class FTX1MeterMonitor:
         ttk.Label(sf, text="Mode:").grid(row=1, column=0, sticky="e", padx=8, pady=3)
         mode_frame = ttk.Frame(sf)
         mode_frame.grid(row=1, column=1, sticky="w")
-        mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var, values=["PRESET", "PKTUSB", "PKTLSB", "USB", "LSB", "CW-U", "CW-L", "AM", "FM", "RTTY", "DATA-U", "DATA-L"], state="readonly", width=12)
+        mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var,
+                                  values=["PRESET", "PKTUSB", "PKTLSB", "USB", "LSB", "CW-U", "CW-L", "AM", "FM",
+                                          "RTTY", "DATA-U", "DATA-L"], state="readonly", width=12)
         mode_combo.pack(side="left")
         mode_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
-        self.preset_check = ttk.Checkbutton(mode_frame, text="PRESET", variable=self.preset_var, command=self.apply_controls)
+        self.preset_check = ttk.Checkbutton(mode_frame, text="PRESET", variable=self.preset_var,
+                                            command=self.apply_controls)
         self.preset_check.pack(side="left", padx=8)
 
-        ttk.Label(mode_frame, text="Filter:").pack(side="left", padx=(15,5))
+        ttk.Label(mode_frame, text="Filter:").pack(side="left", padx=(15, 5))
         ttk.Label(mode_frame, textvariable=self.filter_var, font=("Arial", 10)).pack(side="left")
 
         msf = ttk.LabelFrame(self.root, text="Meters / Status")
@@ -91,47 +104,58 @@ class FTX1MeterMonitor:
         for i, m in enumerate(self.left_meters):
             row_val = i * 2
             label_text = pretty_left.get(m, m)
-            ttk.Label(msf, text=f"{label_text}:").grid(row=row_val, column=0, sticky="e", padx=(8,2), pady=(6,1))
+            ttk.Label(msf, text=f"{label_text}:").grid(row=row_val, column=0, sticky="e", padx=(8, 2), pady=(6, 1))
             var = tk.StringVar(value="—")
             self.meter_labels[m] = var
-            ttk.Label(msf, textvariable=var, font=("Arial", 11, "bold"), width=12, anchor="w").grid(row=row_val, column=1, sticky="w", padx=5)
+            ttk.Label(msf, textvariable=var, font=("Arial", 11, "bold"), width=12, anchor="w").grid(row=row_val,
+                                                                                                    column=1,
+                                                                                                    sticky="w", padx=5)
 
             canvas = tk.Canvas(msf, width=100, height=self.bar_height, bg="#333", highlightthickness=0)
-            canvas.grid(row=row_val + 1, column=1, sticky="w", padx=5, pady=(0,6))
+            canvas.grid(row=row_val + 1, column=1, sticky="w", padx=5, pady=(0, 6))
             self.bar_canvases[m] = canvas
             self.smoothed_values[m] = 0.0
 
         # Right column - Controls
-        ttk.Label(msf, text="Power (W):").grid(row=0, column=2, sticky="e", padx=(8,2), pady=4)
-        self.power_spin = tk.Spinbox(msf, from_=0.5, to=10.0, increment=0.1, textvariable=self.power_var, width=6, command=self.apply_controls)
+        ttk.Label(msf, text="Power (W):").grid(row=0, column=2, sticky="e", padx=(8, 2), pady=4)
+        self.power_spin = tk.Spinbox(msf, from_=0.5, to=10.0, increment=0.1, textvariable=self.power_var, width=6,
+                                     command=self.apply_controls)
         self.power_spin.grid(row=0, column=3, sticky="w", padx=5)
 
-        ttk.Label(msf, text="Preamp:").grid(row=1, column=2, sticky="e", padx=(8,2), pady=4)
-        self.preamp_combo = ttk.Combobox(msf, textvariable=self.preamp_var, values=["IPO", "AMP1", "AMP2"], state="readonly", width=8)
+        ttk.Label(msf, text="Preamp:").grid(row=1, column=2, sticky="e", padx=(8, 2), pady=4)
+        self.preamp_combo = ttk.Combobox(msf, textvariable=self.preamp_var, values=["IPO", "AMP1", "AMP2"],
+                                         state="readonly", width=8)
         self.preamp_combo.grid(row=1, column=3, sticky="w", padx=5)
         self.preamp_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
-        ttk.Label(msf, text="ATT:").grid(row=2, column=2, sticky="e", padx=(8,2), pady=4)
-        self.att_combo = ttk.Combobox(msf, textvariable=self.att_var, values=["Off", "-6 dB", "-12 dB", "-18 dB"], state="readonly", width=8)
+        ttk.Label(msf, text="ATT:").grid(row=2, column=2, sticky="e", padx=(8, 2), pady=4)
+        self.att_combo = ttk.Combobox(msf, textvariable=self.att_var, values=["Off", "-6 dB", "-12 dB", "-18 dB"],
+                                      state="readonly", width=8)
         self.att_combo.grid(row=2, column=3, sticky="w", padx=5)
         self.att_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
-        ttk.Label(msf, text="Squelch:").grid(row=3, column=2, sticky="e", padx=(8,2), pady=4)
-        self.sql_spin = tk.Spinbox(msf, from_=0.0, to=1.0, increment=0.05, textvariable=self.sql_var, width=6, command=self.apply_controls)
+        ttk.Label(msf, text="Squelch:").grid(row=3, column=2, sticky="e", padx=(8, 2), pady=4)
+        self.sql_spin = tk.Spinbox(msf, from_=0.0, to=1.0, increment=0.05, textvariable=self.sql_var, width=6,
+                                   command=self.apply_controls)
         self.sql_spin.grid(row=3, column=3, sticky="w", padx=5)
 
-        ttk.Label(msf, text="AGC:").grid(row=4, column=2, sticky="e", padx=(8,2), pady=4)
-        self.agc_combo = ttk.Combobox(msf, textvariable=self.agc_var, values=["Off", "Fast", "Medium", "Slow", "Auto"], state="readonly", width=10)
+        ttk.Label(msf, text="AGC:").grid(row=4, column=2, sticky="e", padx=(8, 2), pady=4)
+        self.agc_combo = ttk.Combobox(msf, textvariable=self.agc_var, values=["Off", "Fast", "Medium", "Slow", "Auto"],
+                                      state="readonly", width=10)
         self.agc_combo.grid(row=4, column=3, sticky="w", padx=5)
         self.agc_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
-        ttk.Label(msf, text="Noise Red. (NR):").grid(row=5, column=2, sticky="e", padx=(8,2), pady=4)
-        self.nr_combo = ttk.Combobox(msf, textvariable=self.nr_var, values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly", width=8)
+        ttk.Label(msf, text="Noise Red. (NR):").grid(row=5, column=2, sticky="e", padx=(8, 2), pady=4)
+        self.nr_combo = ttk.Combobox(msf, textvariable=self.nr_var,
+                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly",
+                                     width=8)
         self.nr_combo.grid(row=5, column=3, sticky="w", padx=5)
         self.nr_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
-        ttk.Label(msf, text="Noise Bl. (NB):").grid(row=6, column=2, sticky="e", padx=(8,2), pady=4)
-        self.nb_combo = ttk.Combobox(msf, textvariable=self.nb_var, values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly", width=8)
+        ttk.Label(msf, text="Noise Bl. (NB):").grid(row=6, column=2, sticky="e", padx=(8, 2), pady=4)
+        self.nb_combo = ttk.Combobox(msf, textvariable=self.nb_var,
+                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly",
+                                     width=8)
         self.nb_combo.grid(row=6, column=3, sticky="w", padx=5)
         self.nb_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
@@ -139,111 +163,108 @@ class FTX1MeterMonitor:
         reconnect_btn = ttk.Button(self.root, text="Reconnect", command=self.reconnect)
         reconnect_btn.pack(pady=10)
 
+    def update_meter_gui(self, m, value):
+        var = self.meter_labels[m]
+        canvas = self.bar_canvases[m]
+        cfg = self.left_meters[m]
+
+        disp = cfg["fmt"].format(value)
+        var.set(disp)
+
+        canvas.delete("all")
+        fill_width = min(value / cfg["max"], 1.0) * 100
+        color = "green" if value < cfg["max"] * 0.8 else "orange" if value < cfg["max"] else "red"
+        canvas.create_rectangle(0, 0, fill_width, self.bar_height, fill=color, outline="")
+
     def sync_controls_from_radio(self):
         if not self.sock:
             self.status_var.set("Cannot sync - not connected")
             return
-
         success = 0
-        try:
-            pwr_raw = self.rig_cmd("l RFPOWER")
-            if pwr_raw:
-                try:
-                    raw = float(pwr_raw)
-                    disp_w = raw * 10
-                    self.power_var.set(round(disp_w, 1))
-                    self.last_set["power"] = raw
-                    success += 1
-                except:
-                    pass
+        print("--- Startup sync started ---")
 
-            preamp_raw = self.rig_cmd("l PREAMP")
-            if preamp_raw:
-                preamp_map_rev = {0: "IPO", 1: "AMP1", 2: "AMP2"}
-                try:
-                    disp = preamp_map_rev.get(int(float(preamp_raw)), "IPO")
-                    self.preamp_var.set(disp)
-                    self.last_set["preamp"] = int(float(preamp_raw))
-                    success += 1
-                except:
-                    pass
-
-            att_raw = self.rig_cmd("l ATT")
-            if att_raw:
-                att_map_rev = {0: "Off", 6: "-6 dB", 12: "-12 dB", 18: "-18 dB"}
-                try:
-                    disp = att_map_rev.get(int(float(att_raw)), "Off")
-                    self.att_var.set(disp)
-                    self.last_set["att"] = int(float(att_raw))
-                    success += 1
-                except:
-                    pass
-
-            sql_raw = self.rig_cmd("l SQL")
-            if sql_raw:
-                try:
-                    self.sql_var.set(round(float(sql_raw), 2))
-                    self.last_set["sql"] = float(sql_raw)
-                    success += 1
-                except:
-                    pass
-
-            agc_raw = self.rig_cmd("l AGC")
-            if agc_raw:
-                agc_map_rev = {0: "Off", 1: "Fast", 2: "Medium", 3: "Slow", 6: "Auto"}
-                try:
-                    disp = agc_map_rev.get(int(float(agc_raw)), "Off")
-                    self.agc_var.set(disp)
-                    self.last_set["agc"] = int(float(agc_raw))
-                    success += 1
-                except:
-                    pass
-
-            nr_raw = self.rig_cmd("l NR")
-            if nr_raw:
-                try:
-                    raw_nr = float(nr_raw)
-                    nr_level = round(raw_nr * 9)
-                    self.nr_var.set(str(nr_level))
-                    self.last_set["nr"] = nr_level
-                    success += 1
-                except:
-                    self.nr_var.set("Off")
-
-            nb_raw = self.rig_cmd("l NB")
-            if nb_raw:
-                try:
-                    nb_level = int(float(nb_raw))
-                    self.nb_var.set(str(nb_level))
-                    self.last_set["nb"] = nb_level
-                    success += 1
-                except:
-                    self.nb_var.set("Off")
-
-            m = self.rig_cmd("m")
-            if m:
-                parts = m.split()
-                if len(parts) >= 1:
-                    mode_clean = parts[0]
-                    self.mode_var.set(mode_clean)
-
-                    if len(parts) >= 2:
-                        self.filter_var.set(parts[1] + " Hz")
-                    else:
-                        self.filter_var.set("—")
-                else:
-                    self.mode_var.set(m)
-                    self.filter_var.set("—")
+        # RFPOWER
+        resp = self.rig_cmd("l RFPOWER")
+        print(f"l RFPOWER → {resp}")
+        if resp and "Level Value:" in resp:
+            try:
+                raw = float(resp.split("Level Value:")[-1].strip())
+                self.power_var.set(round(raw * 10, 1))
                 success += 1
+            except Exception as e:
+                print(f"RFPOWER error: {e}")
 
-            self.preset_var.set(False)
-            self.last_set["preset"] = False
+        # PREAMP
+        resp = self.rig_cmd("l PREAMP")
+        print(f"l PREAMP → {resp}")
+        if resp and "Level Value:" in resp:
+            try:
+                val = int(float(resp.split("Level Value:")[-1].strip()))
+                preamp_map = {0: "IPO", 1: "AMP1", 2: "AMP2"}
+                self.preamp_var.set(preamp_map.get(val, "IPO"))
+                success += 1
+            except:
+                pass
 
-            self.status_var.set(f"Startup sync: {success}/8 settings read")
+        # ATT
+        resp = self.rig_cmd("l ATT")
+        print(f"l ATT → {resp}")
+        if resp and "Level Value:" in resp:
+            try:
+                val = int(float(resp.split("Level Value:")[-1].strip()))
+                att_map = {0: "Off", 6: "-6 dB", 12: "-12 dB", 18: "-18 dB"}
+                self.att_var.set(att_map.get(val, "Off"))
+                success += 1
+            except:
+                pass
 
-        except Exception as e:
-            print(f"Startup sync error: {e}")
-            self.status_var.set("Partial startup sync")
+        # SQL
+        resp = self.rig_cmd("l SQL")
+        print(f"l SQL → {resp}")
+        if resp and "Level Value:" in resp:
+            try:
+                val = float(resp.split("Level Value:")[-1].strip())
+                self.sql_var.set(val)
+                success += 1
+            except:
+                pass
+
+        # AGC
+        resp = self.rig_cmd("l AGC")
+        print(f"l AGC → {resp}")
+        if resp and "Level Value:" in resp:
+            try:
+                val = int(float(resp.split("Level Value:")[-1].strip()))
+                agc_map = {0: "Off", 1: "Fast", 2: "Medium", 3: "Slow", 4: "Auto"}
+                self.agc_var.set(agc_map.get(val, "Off"))
+                success += 1
+            except:
+                pass
+
+        # NR
+        resp = self.rig_cmd("l NR")
+        print(f"l NR → {resp}")
+        if resp and "Level Value:" in resp:
+            try:
+                val = int(float(resp.split("Level Value:")[-1].strip()))
+                self.nr_var.set(str(val))
+                success += 1
+            except:
+                pass
+
+        # NB
+        resp = self.rig_cmd("l NB")
+        print(f"l NB → {resp}")
+        if resp and "Level Value:" in resp:
+            try:
+                val = int(float(resp.split("Level Value:")[-1].strip()))
+                self.nb_var.set(str(val))
+                success += 1
+            except:
+                pass
+
+        self.status_var.set(f"Startup sync: {success}/8 settings read")
+        print(f"--- Startup sync complete: {success} successful ---")
 
     def apply_controls(self):
         if not self.sock:
@@ -331,14 +352,20 @@ class FTX1MeterMonitor:
             fill_color = "lime"
         elif name == "SWR":
             pct = min(max((smoothed - 1.0) / 4.0, 0), 1.0)
-            if smoothed > 2.5: fill_color = "red"
-            elif smoothed > 1.7: fill_color = "orange"
-            else: fill_color = "lime"
+            if smoothed > 2.5:
+                fill_color = "red"
+            elif smoothed > 1.7:
+                fill_color = "orange"
+            else:
+                fill_color = "lime"
         elif name == "ALC":
             pct = min(smoothed, 1.0)
-            if smoothed > 0.7: fill_color = "red"
-            elif smoothed > 0.4: fill_color = "orange"
-            else: fill_color = "lime"
+            if smoothed > 0.7:
+                fill_color = "red"
+            elif smoothed > 0.4:
+                fill_color = "orange"
+            else:
+                fill_color = "lime"
         elif name == "STRENGTH":
             try:
                 abs_raw = abs(float(raw_val))
@@ -349,9 +376,12 @@ class FTX1MeterMonitor:
             smoothed_pct = self.smoothing_alpha * pct + (1 - self.smoothing_alpha) * old_pct
             self.smoothed_values[name + "_pct"] = smoothed_pct
             pct = smoothed_pct
-            if pct > 0.9: fill_color = "red"
-            elif pct > 0.7: fill_color = "orange"
-            else: fill_color = "lime"
+            if pct > 0.9:
+                fill_color = "red"
+            elif pct > 0.7:
+                fill_color = "orange"
+            else:
+                fill_color = "lime"
         elif name == "COMP":
             pct = min(smoothed, 1.0)
             fill_color = "lime"
@@ -399,6 +429,7 @@ class FTX1MeterMonitor:
             return
 
         try:
+            # === YOUR ORIGINAL CONTROL READ-BACK (freq, mode, filter, power, preamp, att, sql, agc, nr, nb) ===
             f = self.rig_cmd("f")
             if f and f.replace(".", "").isdigit():
                 self.freq_var.set(f"{float(f)/1_000_000:.6f} MHz")
@@ -409,7 +440,6 @@ class FTX1MeterMonitor:
                 if len(parts) >= 1:
                     mode_clean = parts[0]
                     self.mode_var.set(mode_clean)
-
                     if len(parts) >= 2:
                         self.filter_var.set(parts[1] + " Hz")
                     else:
@@ -418,13 +448,7 @@ class FTX1MeterMonitor:
                     self.mode_var.set(m)
                     self.filter_var.set("—")
 
-            for name in self.left_meters:
-                val = self.rig_cmd(f"l {name}")
-                display_val = self.format_value(name, val)
-                self.meter_labels[name].set(display_val)
-                self.update_progress_bar(name, val)
-
-            # Read-back for controls - skip if recently changed
+            # Read-back for controls - skip if recently changed (your original code)
             if time.time() < self.ignore_readback_until:
                 self.status_var.set("Waiting for radio to apply changes...")
             else:
@@ -495,6 +519,42 @@ class FTX1MeterMonitor:
                     except:
                         self.nb_combo.config(foreground="black")
 
+            # === NEW RAW RM METER POLLING (added here) ===
+            try:
+                pwr_resp = self.rig_cmd("l RFPOWER")
+                rfpower = float(pwr_resp.split("Level Value:")[-1].strip()) if pwr_resp and "Level Value:" in pwr_resp else 0.0
+                is_tx = rfpower > 0.5
+            except:
+                rfpower = 0.0
+                is_tx = False
+
+            for m, cfg in self.left_meters.items():
+                if cfg["tx_only"] and not is_tx:
+                    self.update_meter_gui(m, 0.0)
+                    continue
+
+                try:
+                    if m in ["ALC", "COMP"]:
+                        self.rig_cmd(f"L METER {m.upper()}")
+                    time.sleep(0.05)
+
+                    resp = self.rig_cmd(f"w RM{cfg['rm']};")
+
+                    if resp and resp.startswith(f"RM{cfg['rm']}") and ";" in resp:
+                        raw = int(resp[3:6])
+                        value = cfg["scale"](raw)
+
+                        prev = self.smoothed_values[m]
+                        smoothed = self.smoothing_alpha * prev + (1 - self.smoothing_alpha) * value
+                        self.smoothed_values[m] = smoothed
+
+                        self.update_meter_gui(m, smoothed)
+                    else:
+                        self.update_meter_gui(m, 0.0)
+                except Exception as e:
+                    print(f"Meter {m} error: {e}")
+                    self.update_meter_gui(m, 0.0)
+
         except Exception as e:
             print(f"Poll error: {e}")
 
@@ -504,14 +564,20 @@ class FTX1MeterMonitor:
         else:
             self.status_var.set(f"Connected ✓ ({elapsed:.2f}s)")
 
-        self.root.after(1000, self.update_readings)  # Poll every 1 second
+        self.root.after(1000, self.update_readings)
 
-    def reconnect(self):
-        self.connect_to_rig()
-        self.status_var.set("Reconnecting...")
+
+def reconnect(self):
+    self.connect_to_rig()
+    self.status_var.set("Reconnecting...")
 
     def quit_app(self):
-        if self.sock: self.sock.close()
+        """Clean shutdown"""
+        if self.sock:
+            try:
+                self.sock.close()
+            except:
+                pass
         self.root.destroy()
 
 if __name__ == "__main__":
