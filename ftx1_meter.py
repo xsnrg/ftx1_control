@@ -29,12 +29,12 @@ class FTX1MeterMonitor:
         # Raw RM meters using correct Yaesu CAT codes (bypasses Hamlib bug)
         self.left_meters = {
             "STRENGTH": {"rm": 1, "scale": lambda r: r / 2.55, "tx_only": False, "fmt": "{:.0f} dB", "max": 100},
-            "PO":       {"rm": 5, "scale": lambda r: r / 2.55, "tx_only": True,  "fmt": "{:.1f} W",  "max": 100},
-            "SWR":      {"rm": 6, "scale": lambda r: 1.0 + (r / 50.0), "tx_only": True, "fmt": "{:.2f}:1", "max": 5.0},
-            "ALC":      {"rm": 4, "scale": lambda r: min(r / 25.5, 10.0), "tx_only": True, "fmt": "{:.1f}", "max": 10.0},
-            "COMP":     {"rm": 3, "scale": lambda r: r / 2.55, "tx_only": True,  "fmt": "{:.0f}%", "max": 100},
-            "VDD":      {"rm": 8, "scale": lambda r: r / 15, "tx_only": False, "fmt": "{:.1f} V", "max": 15.0},
-            "ID":       {"rm": 7, "scale": lambda r: r / 25.5, "tx_only": True,  "fmt": "{:.1f} A", "max": 10.0},
+            "PO": {"rm": 5, "scale": lambda r: r / 2.55, "tx_only": True, "fmt": "{:.1f} W", "max": 100},
+            "SWR": {"rm": 6, "scale": lambda r: 1.0 + (r / 50.0), "tx_only": True, "fmt": "{:.2f}:1", "max": 5.0},
+            "ALC": {"rm": 4, "scale": lambda r: min(r / 25.5, 10.0), "tx_only": True, "fmt": "{:.1f}", "max": 10.0},
+            "COMP": {"rm": 3, "scale": lambda r: r / 2.55, "tx_only": True, "fmt": "{:.0f}%", "max": 100},
+            "VDD": {"rm": 8, "scale": lambda r: r / 15, "tx_only": False, "fmt": "{:.1f} V", "max": 15.0},
+            "ID": {"rm": 7, "scale": lambda r: r / 25.5, "tx_only": True, "fmt": "{:.1f} A", "max": 10.0},
         }
 
         self.meter_labels = {}
@@ -432,7 +432,7 @@ class FTX1MeterMonitor:
             # === YOUR ORIGINAL CONTROL READ-BACK (freq, mode, filter, power, preamp, att, sql, agc, nr, nb) ===
             f = self.rig_cmd("f")
             if f and f.replace(".", "").isdigit():
-                self.freq_var.set(f"{float(f)/1_000_000:.6f} MHz")
+                self.freq_var.set(f"{float(f) / 1_000_000:.6f} MHz")
 
             m = self.rig_cmd("m")
             if m:
@@ -458,7 +458,8 @@ class FTX1MeterMonitor:
                         raw = float(pwr_raw)
                         disp_w = raw * 10
                         self.power_var.set(round(disp_w, 1))
-                        self.power_spin.config(foreground="green" if abs(disp_w - self.last_set.get("power", 0) * 10) < 0.5 else "black")
+                        self.power_spin.config(
+                            foreground="green" if abs(disp_w - self.last_set.get("power", 0) * 10) < 0.5 else "black")
                     except:
                         self.power_spin.config(foreground="black")
 
@@ -486,7 +487,8 @@ class FTX1MeterMonitor:
                 if sql_raw:
                     try:
                         self.sql_var.set(round(float(sql_raw), 2))
-                        self.sql_spin.config(foreground="green" if abs(float(sql_raw) - self.last_set.get("sql", 0.0)) < 0.05 else "black")
+                        self.sql_spin.config(foreground="green" if abs(
+                            float(sql_raw) - self.last_set.get("sql", 0.0)) < 0.05 else "black")
                     except:
                         self.sql_spin.config(foreground="black")
 
@@ -522,7 +524,8 @@ class FTX1MeterMonitor:
             # === NEW RAW RM METER POLLING (added here) ===
             try:
                 pwr_resp = self.rig_cmd("l RFPOWER")
-                rfpower = float(pwr_resp.split("Level Value:")[-1].strip()) if pwr_resp and "Level Value:" in pwr_resp else 0.0
+                rfpower = float(
+                    pwr_resp.split("Level Value:")[-1].strip()) if pwr_resp and "Level Value:" in pwr_resp else 0.0
                 is_tx = rfpower > 0.5
             except:
                 rfpower = 0.0
@@ -566,19 +569,19 @@ class FTX1MeterMonitor:
 
         self.root.after(1000, self.update_readings)
 
-
-def reconnect(self):
-    self.connect_to_rig()
-    self.status_var.set("Reconnecting...")
+    def reconnect(self):
+        self.connect_to_rig()
+        self.status_var.set("Reconnecting...")
 
     def quit_app(self):
-        """Clean shutdown"""
-        if self.sock:
+        """Clean shutdown when window is closed"""
+        if hasattr(self, 'sock') and self.sock:
             try:
                 self.sock.close()
             except:
                 pass
         self.root.destroy()
+
 
 if __name__ == "__main__":
     host = sys.argv[1] if len(sys.argv) > 1 else "localhost"
