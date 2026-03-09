@@ -61,7 +61,7 @@ class FTX1MeterMonitor:
 
         self.build_gui()
         self.connect_to_rig()
-        self.root.after(800, self.sync_controls_from_radio)
+        self.root.after(800, self._sync_controls_from_radio)
         self.root.after(1000, self.update_readings)
 
     def build_gui(self):
@@ -88,35 +88,39 @@ class FTX1MeterMonitor:
         ttk.Label(mode_frame, text="Filter:").pack(side="left", padx=(15, 5))
         ttk.Label(mode_frame, textvariable=self.filter_var, font=("Arial", 10)).pack(side="left")
 
-        msf = ttk.LabelFrame(self.root, text="Meters / Status")
+        msf = ttk.LabelFrame(self.root, text="Meters")
         msf.pack(fill="both", expand=True, padx=10, pady=6)
         msf.columnconfigure(0, weight=1)
         msf.columnconfigure(2, weight=1)
 
-        # Left column - Meters (only supported levels)
         pretty_left = {
             "STRENGTH": "S-Meter",
-            "RFPOWER": "PO",
+            "PO": "PO",
             "SWR": "SWR",
             "ALC": "ALC",
-            "COMP": "COMP"
+            "COMP": "COMP",
+            "VDD": "VDD",
+            "ID": "ID",
         }
-        for i, m in enumerate(self.left_meters):
-            row_val = i * 2
+
+        row = 0
+        for m in self.left_meters:  # iterates in dict order: STRENGTH → ID
             label_text = pretty_left.get(m, m)
-            ttk.Label(msf, text=f"{label_text}:").grid(row=row_val, column=0, sticky="e", padx=(8, 2), pady=(6, 1))
+            ttk.Label(msf, text=f"{label_text}:").grid(row=row, column=0, sticky="e", padx=(10, 4), pady=(6, 1))
+
             var = tk.StringVar(value="—")
             self.meter_labels[m] = var
-            ttk.Label(msf, textvariable=var, font=("Arial", 11, "bold"), width=12, anchor="w").grid(row=row_val,
-                                                                                                    column=1,
-                                                                                                    sticky="w", padx=5)
+            ttk.Label(msf, textvariable=var, font=("Arial", 11, "bold"), width=12, anchor="w").grid(
+                row=row, column=1, sticky="w", padx=6)
 
-            canvas = tk.Canvas(msf, width=100, height=self.bar_height, bg="#333", highlightthickness=0)
-            canvas.grid(row=row_val + 1, column=1, sticky="w", padx=5, pady=(0, 6))
+            canvas = tk.Canvas(msf, width=120, height=self.bar_height, bg="#222", highlightthickness=0)
+            canvas.grid(row=row + 1, column=1, sticky="w", padx=6, pady=(0, 8))
             self.bar_canvases[m] = canvas
             self.smoothed_values[m] = 0.0
 
-        # Right column - Controls
+            row += 2
+
+        # Right column — Controls (unchanged, sits neatly at the top)
         ttk.Label(msf, text="Power (W):").grid(row=0, column=2, sticky="e", padx=(8, 2), pady=4)
         self.power_spin = tk.Spinbox(msf, from_=0.5, to=10.0, increment=0.1, textvariable=self.power_var, width=6,
                                      command=self.apply_controls)
@@ -176,7 +180,7 @@ class FTX1MeterMonitor:
         color = "green" if value < cfg["max"] * 0.8 else "orange" if value < cfg["max"] else "red"
         canvas.create_rectangle(0, 0, fill_width, self.bar_height, fill=color, outline="")
 
-    def sync_controls_from_radio(self):
+    def _sync_controls_from_radio(self):
         if not self.sock:
             self.status_var.set("Cannot sync - not connected")
             return
@@ -420,16 +424,34 @@ class FTX1MeterMonitor:
             self.status_var.set("Connection dropped - reconnecting...")
             return None
 
-    def update_readings(self):
-        start = time.time()
+    def get_raw_meter(self, rm_num):
+        """Read raw Yaesu RM meter value (0-255). Robust against real responses like 'RM7070000;'."""
+        try:
+            resp = self.rig_cmd(f"w RM{rm_num};")
+            if not resp or not resp.startswith(f"RM{rm_num}") or ";" not in resp:
+                return 0
 
+            # Extract first 3 digits after "RMx" — works for RM7070000;, RM5123000;, etc.
+            data = resp[len(f"RM{rm_num}"):].split(';')[0].strip()
+            if len(data) >= 3 and data[:3].isdigit():
+                raw = int(data[:3])
+                # print(f"DEBUG RM{rm_num} → raw={raw} (resp={repr(resp)})")  # uncomment during testing
+                return raw
+            return 0
+        except Exception as e:
+            print(f"RM{rm_num} read error: {e}")
+            return 0
+
+    def update_readings(self):
+        """Clean 1-second meter + status poll (ID now works reliably)."""
         if not self.sock:
+            self.status_var.set("Disconnected — retrying...")
             self.root.after(3000, self.reconnect)
             self.root.after(1000, self.update_readings)
             return
 
         try:
-            # === YOUR ORIGINAL CONTROL READ-BACK (freq, mode, filter, power, preamp, att, sql, agc, nr, nb) ===
+            # --- 1. Basic status (freq + mode) ---
             f = self.rig_cmd("f")
             if f and f.replace(".", "").isdigit():
                 self.freq_var.set(f"{float(f) / 1_000_000:.6f} MHz")
@@ -437,136 +459,39 @@ class FTX1MeterMonitor:
             m = self.rig_cmd("m")
             if m:
                 parts = m.split()
-                if len(parts) >= 1:
-                    mode_clean = parts[0]
-                    self.mode_var.set(mode_clean)
-                    if len(parts) >= 2:
-                        self.filter_var.set(parts[1] + " Hz")
-                    else:
-                        self.filter_var.set("—")
-                else:
-                    self.mode_var.set(m)
-                    self.filter_var.set("—")
+                self.mode_var.set(parts[0] if parts else "—")
+                self.filter_var.set(parts[1] + " Hz" if len(parts) > 1 else "—")
 
-            # Read-back for controls - skip if recently changed (your original code)
-            if time.time() < self.ignore_readback_until:
-                self.status_var.set("Waiting for radio to apply changes...")
-            else:
-                pwr_raw = self.rig_cmd("l RFPOWER")
-                if pwr_raw:
-                    try:
-                        raw = float(pwr_raw)
-                        disp_w = raw * 10
-                        self.power_var.set(round(disp_w, 1))
-                        self.power_spin.config(
-                            foreground="green" if abs(disp_w - self.last_set.get("power", 0) * 10) < 0.5 else "black")
-                    except:
-                        self.power_spin.config(foreground="black")
+            # --- 2. Control readback (skip right after user change) ---
+            if time.time() >= self.ignore_readback_until:
+                self._sync_controls_from_radio()          # your existing sync logic (kept separate)
 
-                preamp_raw = self.rig_cmd("l PREAMP")
-                if preamp_raw:
-                    preamp_map_rev = {0: "IPO", 1: "AMP1", 2: "AMP2"}
-                    try:
-                        disp = preamp_map_rev.get(int(float(preamp_raw)), "IPO")
-                        self.preamp_var.set(disp)
-                        self.preamp_combo.config(foreground="green" if disp == self.preamp_var.get() else "black")
-                    except:
-                        self.preamp_combo.config(foreground="black")
+            # --- 3. TX detection (much more reliable than old l RFPOWER) ---
+            po_raw = self.get_raw_meter(5)                # RM5 = PO
+            is_tx = po_raw > 8                            # ~3% of scale = transmitting
 
-                att_raw = self.rig_cmd("l ATT")
-                if att_raw:
-                    att_map_rev = {0: "Off", 6: "-6 dB", 12: "-12 dB", 18: "-18 dB"}
-                    try:
-                        disp = att_map_rev.get(int(float(att_raw)), "Off")
-                        self.att_var.set(disp)
-                        self.att_combo.config(foreground="green" if disp == self.att_var.get() else "black")
-                    except:
-                        self.att_combo.config(foreground="black")
-
-                sql_raw = self.rig_cmd("l SQL")
-                if sql_raw:
-                    try:
-                        self.sql_var.set(round(float(sql_raw), 2))
-                        self.sql_spin.config(foreground="green" if abs(
-                            float(sql_raw) - self.last_set.get("sql", 0.0)) < 0.05 else "black")
-                    except:
-                        self.sql_spin.config(foreground="black")
-
-                agc_raw = self.rig_cmd("l AGC")
-                if agc_raw:
-                    agc_map_rev = {0: "Off", 1: "Fast", 2: "Medium", 3: "Slow", 6: "Auto"}
-                    try:
-                        disp = agc_map_rev.get(int(float(agc_raw)), "Off")
-                        self.agc_var.set(disp)
-                        self.agc_combo.config(foreground="green" if disp == self.agc_var.get() else "black")
-                    except:
-                        self.agc_combo.config(foreground="black")
-
-                nr_raw = self.rig_cmd("l NR")
-                if nr_raw:
-                    try:
-                        raw_nr = float(nr_raw)
-                        nr_level = round(raw_nr * 9)
-                        self.nr_var.set(str(nr_level))
-                        self.nr_combo.config(foreground="green" if nr_level == self.last_set.get("nr", 0) else "black")
-                    except:
-                        self.nr_combo.config(foreground="black")
-
-                nb_raw = self.rig_cmd("l NB")
-                if nb_raw:
-                    try:
-                        nb_level = int(float(nb_raw))
-                        self.nb_var.set(str(nb_level))
-                        self.nb_combo.config(foreground="green" if nb_level == self.last_set.get("nb", 0) else "black")
-                    except:
-                        self.nb_combo.config(foreground="black")
-
-            # === NEW RAW RM METER POLLING (added here) ===
-            try:
-                pwr_resp = self.rig_cmd("l RFPOWER")
-                rfpower = float(
-                    pwr_resp.split("Level Value:")[-1].strip()) if pwr_resp and "Level Value:" in pwr_resp else 0.0
-                is_tx = rfpower > 0.5
-            except:
-                rfpower = 0.0
-                is_tx = False
-
-            for m, cfg in self.left_meters.items():
-                if cfg["tx_only"] and not is_tx:
-                    self.update_meter_gui(m, 0.0)
+            # --- 4. All meters (uniform, clean, ID now works) ---
+            for name, cfg in self.left_meters.items():
+                if cfg.get("tx_only", False) and not is_tx:
+                    self.update_meter_gui(name, 0.0)
+                    self.smoothed_values[name] = 0.0
                     continue
 
-                try:
-                    if m in ["ALC", "COMP"]:
-                        self.rig_cmd(f"L METER {m.upper()}")
-                    time.sleep(0.05)
+                raw = self.get_raw_meter(cfg["rm"])
+                value = cfg["scale"](raw)
 
-                    resp = self.rig_cmd(f"w RM{cfg['rm']};")
+                # EMA smoothing
+                prev = self.smoothed_values[name]
+                smoothed = self.smoothing_alpha * prev + (1 - self.smoothing_alpha) * value
+                self.smoothed_values[name] = smoothed
 
-                    if resp and resp.startswith(f"RM{cfg['rm']}") and ";" in resp:
-                        raw = int(resp[3:6])
-                        value = cfg["scale"](raw)
-
-                        prev = self.smoothed_values[m]
-                        smoothed = self.smoothing_alpha * prev + (1 - self.smoothing_alpha) * value
-                        self.smoothed_values[m] = smoothed
-
-                        self.update_meter_gui(m, smoothed)
-                    else:
-                        self.update_meter_gui(m, 0.0)
-                except Exception as e:
-                    print(f"Meter {m} error: {e}")
-                    self.update_meter_gui(m, 0.0)
+                self.update_meter_gui(name, smoothed)
 
         except Exception as e:
-            print(f"Poll error: {e}")
+            print(f"Poll cycle error: {e}")
 
-        elapsed = time.time() - start
-        if elapsed > 0.3:
-            self.status_var.set(f"Poll: {elapsed:.2f}s")
-        else:
-            self.status_var.set(f"Connected ✓ ({elapsed:.2f}s)")
-
+        # Status line
+        self.status_var.set("Connected ✓")
         self.root.after(1000, self.update_readings)
 
     def reconnect(self):
