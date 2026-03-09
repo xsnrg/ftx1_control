@@ -61,8 +61,23 @@ class FTX1MeterMonitor:
 
         self.build_gui()
         self.connect_to_rig()
-        self.root.after(800, self._sync_controls_from_radio)
-        self.root.after(1000, self.update_readings)
+
+        self.startup_sync_done = False
+        self.startup_retries = 0
+        self.max_startup_retries = 5
+
+        self.sync_in_progress = False
+        self.last_user_change_time = time.time()  # init to now to skip early periodic
+        self.last_control_sync_time = 0.0
+        self.control_sync_interval = 20.0  # seconds
+        self.user_debounce_sec = 8.0  # ignore periodic after app change
+
+        self.build_gui()
+        self.connect_to_rig()
+        print("Connect done — waiting 2s before first sync")
+        self.root.after(2000, self._startup_control_sync)
+
+        self.root.after(600, self._perform_control_sync)  # startup only
 
     def build_gui(self):
         ttk.Label(self.root, textvariable=self.status_var, font=("Arial", 9)).pack(pady=(8, 4))
@@ -180,101 +195,117 @@ class FTX1MeterMonitor:
         color = "green" if value < cfg["max"] * 0.8 else "orange" if value < cfg["max"] else "red"
         canvas.create_rectangle(0, 0, fill_width, self.bar_height, fill=color, outline="")
 
-    def _sync_controls_from_radio(self):
-        if not self.sock:
-            self.status_var.set("Cannot sync - not connected")
-            return
-        success = 0
-        print("--- Startup sync started ---")
+    def _perform_control_sync(self, force=False):
+        now = time.time()
 
-        # RFPOWER
+        if self.sync_in_progress:
+            return
+
+        if not force and now - self.last_control_sync_time < self.control_sync_interval:
+            return  # too soon for periodic
+
+        if not force and now - self.last_user_change_time < self.user_debounce_sec:
+            return  # recent user/app change - skip to avoid fight
+
+        self.sync_in_progress = True
+        success = 0
+
+        # Your try_set helper (keep or inline)
+        def try_set(var, resp, parser=float, setter=None):
+            nonlocal success
+            if not resp or not resp.strip() or "RPRT" in resp:
+                return
+            try:
+                val = parser(resp.strip())
+                if setter:
+                    setter(val)
+                else:
+                    var.set(val)
+                success += 1
+            except:
+                pass
+
+        # RFPOWER (scale to 0.5-10 W as per your spinbox)
         resp = self.rig_cmd("l RFPOWER")
         print(f"l RFPOWER → {resp}")
-        if resp and "Level Value:" in resp:
-            try:
-                raw = float(resp.split("Level Value:")[-1].strip())
-                self.power_var.set(round(raw * 10, 1))
-                success += 1
-            except Exception as e:
-                print(f"RFPOWER error: {e}")
+        try_set(self.power_var, resp, lambda s: max(0.5, min(10.0, round(float(s) * 10, 1))))
 
-        # PREAMP
+        # PREAMP (0=IPO, 1=AMP1, 2=AMP2)
         resp = self.rig_cmd("l PREAMP")
         print(f"l PREAMP → {resp}")
-        if resp and "Level Value:" in resp:
-            try:
-                val = int(float(resp.split("Level Value:")[-1].strip()))
-                preamp_map = {0: "IPO", 1: "AMP1", 2: "AMP2"}
-                self.preamp_var.set(preamp_map.get(val, "IPO"))
-                success += 1
-            except:
-                pass
 
-        # ATT
+        def set_preamp(v):
+            map_ = {0: "IPO", 1: "AMP1", 2: "AMP2"}
+            self.preamp_var.set(map_.get(int(v), "IPO"))
+
+        try_set(None, resp, parser=int, setter=set_preamp)
+
+        # ATT (0=Off, 6=-6, 12=-12, 18=-18)
         resp = self.rig_cmd("l ATT")
         print(f"l ATT → {resp}")
-        if resp and "Level Value:" in resp:
-            try:
-                val = int(float(resp.split("Level Value:")[-1].strip()))
-                att_map = {0: "Off", 6: "-6 dB", 12: "-12 dB", 18: "-18 dB"}
-                self.att_var.set(att_map.get(val, "Off"))
-                success += 1
-            except:
-                pass
 
-        # SQL
+        def set_att(v):
+            map_ = {0: "Off", 6: "-6 dB", 12: "-12 dB", 18: "-18 dB"}
+            self.att_var.set(map_.get(int(v), "Off"))
+
+        try_set(None, resp, parser=int, setter=set_att)
+
+        # SQL (0-1 float)
         resp = self.rig_cmd("l SQL")
         print(f"l SQL → {resp}")
-        if resp and "Level Value:" in resp:
-            try:
-                val = float(resp.split("Level Value:")[-1].strip())
-                self.sql_var.set(val)
-                success += 1
-            except:
-                pass
+        try_set(self.sql_var, resp)
 
-        # AGC
+        # AGC (0=Off, 1=Fast, 2=Medium, 3=Slow, 4=Auto ? — adjust map if needed)
         resp = self.rig_cmd("l AGC")
         print(f"l AGC → {resp}")
-        if resp and "Level Value:" in resp:
-            try:
-                val = int(float(resp.split("Level Value:")[-1].strip()))
-                agc_map = {0: "Off", 1: "Fast", 2: "Medium", 3: "Slow", 4: "Auto"}
-                self.agc_var.set(agc_map.get(val, "Off"))
-                success += 1
-            except:
-                pass
 
-        # NR
+        def set_agc(v):
+            map_ = {0: "Off", 1: "Fast", 2: "Medium", 3: "Slow", 4: "Auto"}
+            self.agc_var.set(map_.get(int(v), "Off"))
+
+        try_set(None, resp, parser=int, setter=set_agc)
+
+        # NR (likely 0-1 scaled, but your values show 0.0666667 → perhaps 1/15?)
         resp = self.rig_cmd("l NR")
         print(f"l NR → {resp}")
-        if resp and "Level Value:" in resp:
-            try:
-                val = int(float(resp.split("Level Value:")[-1].strip()))
-                self.nr_var.set(str(val))
-                success += 1
-            except:
-                pass
+        try_set(self.nr_var, resp)  # keep as str or map to int 0-9 if needed
 
-        # NB
+        # NB (0-1 or 0-9?)
         resp = self.rig_cmd("l NB")
         print(f"l NB → {resp}")
-        if resp and "Level Value:" in resp:
-            try:
-                val = int(float(resp.split("Level Value:")[-1].strip()))
-                self.nb_var.set(str(val))
-                success += 1
-            except:
-                pass
+        try_set(self.nb_var, resp)
 
-        self.status_var.set(f"Startup sync: {success}/8 settings read")
-        print(f"--- Startup sync complete: {success} successful ---")
+
+        self.sync_in_progress = False
+        self.last_control_sync_time = now
+
+        print(f"Control sync: {success}/7 successful")
+        return success
+
+    def _startup_control_sync(self):
+        if self.startup_sync_done:
+            return
+
+        success = self._perform_control_sync(force=True)
+
+        if success >= 5:
+            self.startup_sync_done = True
+            self.status_var.set("Startup sync OK ✓")
+            self.root.after(200, self.update_readings)  # now start polling
+        else:
+            self.startup_retries += 1
+            if self.startup_retries < self.max_startup_retries:
+                self.root.after(4000, self._startup_control_sync)
+            else:
+                self.startup_sync_done = True
+                self.root.after(200, self.update_readings)  # continue anyway
 
     def apply_controls(self):
         if not self.sock:
             self.status_var.set("Not connected")
             return
 
+        self.last_user_change_time = time.time()
         self.ignore_readback_until = time.time() + 12.0
 
         power_w = self.power_var.get()
@@ -443,7 +474,10 @@ class FTX1MeterMonitor:
             return 0
 
     def update_readings(self):
-        """Clean 1-second meter + status poll (ID now works reliably)."""
+        now = time.time()
+        if now - self.last_control_sync_time > self.control_sync_interval:
+            self._perform_control_sync()  # non-force = respects debounce
+
         if not self.sock:
             self.status_var.set("Disconnected — retrying...")
             self.root.after(3000, self.reconnect)
