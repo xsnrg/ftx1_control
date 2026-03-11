@@ -631,16 +631,31 @@ class FTX1MeterMonitor:
             self.status_var.set("Connection dropped - reconnecting...")
             return None
 
-    def get_hamlib_level(self, hamlib_cmd):
-        """Read a meter value using a standard Hamlib 'l' (get_level) command."""
+    def get_hamlib_level(self, cmd):
+        if not self.sock:
+            return None
         try:
-            resp = self.rig_cmd(hamlib_cmd)
-            if not resp or not resp.strip():
-                return 0.0
-            return float(resp.strip())
+            self.sock.sendall(f"{cmd}\n".encode())
+            response = ""
+            while True:
+                data = self.sock.recv(1024).decode(errors='ignore')
+                if not data:
+                    break
+                response += data
+                if "RPRT" in response:
+                    break  # Hamlib ends with RPRT line
+
+            if "RPRT 0" not in response:
+                return None  # error
+
+            # Extract value line (before RPRT)
+            lines = response.splitlines()
+            value_line = lines[0].strip() if lines else ""
+            return value_line  # return as str, e.g. "0.450000"
+
         except Exception as e:
-            print(f"Hamlib level '{hamlib_cmd}' read error: {e}")
-            return 0.0
+            print(f"Level fetch error for {cmd}: {e}")
+            return None
 
     def update_readings(self):
         now = time.time()
@@ -669,14 +684,15 @@ class FTX1MeterMonitor:
 
             for name, cfg in self.left_meters.items():
                 raw_str = self.get_hamlib_level(cfg["hamlib_cmd"])
-                if not raw_str or "RPRT" in raw_str or "Error" in raw_str:
+                if raw_str is None:
                     self.update_meter_gui(name, 0.0)
                     continue
 
                 try:
-                    raw = float(raw_str.strip())
-                except (ValueError, TypeError):
-                    raw = 0.0
+                    raw = float(raw_str)
+                except ValueError:
+                    self.update_meter_gui(name, 0.0)
+                    continue
 
                 value = cfg["scale"](raw)
 
