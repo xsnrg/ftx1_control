@@ -119,8 +119,7 @@ class FTX1MeterMonitor:
         self.root.after(1000, self._perform_control_sync)  # startup only
 
     def build_gui(self):
-        ttk.Label(self.root, textvariable=self.status_var, font=("Arial", 9)).pack(pady=(8, 4))
-
+        # Radio Status (top)
         sf = ttk.LabelFrame(self.root, text="Radio Status")
         sf.pack(fill="x", padx=10, pady=5)
         self.freq_var = tk.StringVar(value="—")
@@ -142,18 +141,18 @@ class FTX1MeterMonitor:
         ttk.Label(mode_frame, text="Filter:").pack(side="left", padx=(15, 5))
         ttk.Label(mode_frame, textvariable=self.filter_var, font=("Arial", 10)).pack(side="left")
 
-        # Meters section – split into left (meters) and right (controls) side-by-side
+        # Meters & Controls section – side-by-side layout
         msf = ttk.LabelFrame(self.root, text="Meters & Controls")
         msf.pack(fill="both", expand=True, padx=10, pady=6)
 
-        msf.columnconfigure(0, weight=3)  # left meters take more space
-        msf.columnconfigure(1, weight=0)  # thin vertical separator
-        msf.columnconfigure(2, weight=1)  # right controls
+        msf.columnconfigure(0, weight=3)   # left meters take more space
+        msf.columnconfigure(1, weight=0)   # thin vertical separator
+        msf.columnconfigure(2, weight=1)   # right controls
 
-        # Optional thin vertical separator
+        # Thin vertical separator
         ttk.Separator(msf, orient='vertical').grid(row=0, column=1, sticky='ns', padx=4, pady=4)
 
-        # Left side: meters (same uniform grid as before)
+        # Left side: meters
         left_meter_frame = ttk.Frame(msf)
         left_meter_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 4), pady=6)
 
@@ -216,7 +215,7 @@ class FTX1MeterMonitor:
 
             row += 2
 
-        # Right side: all controls in a dedicated frame (no row conflict)
+        # Right side: controls
         right_controls_frame = ttk.Frame(msf)
         right_controls_frame.grid(row=0, column=2, sticky="n", padx=(20, 10), pady=8)
 
@@ -283,9 +282,16 @@ class FTX1MeterMonitor:
         self.nb_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.nb_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
-        # Reconnect button
-        reconnect_btn = ttk.Button(self.root, text="Reconnect", command=self.reconnect)
-        reconnect_btn.pack(pady=8)
+        # Bottom status bar: connection status + Reconnect button
+        bottom_frame = ttk.Frame(self.root)
+        bottom_frame.pack(fill="x", pady=8, padx=10)
+
+        # Status label on left
+        ttk.Label(bottom_frame, textvariable=self.status_var, font=("Arial", 9)).pack(side="left")
+
+        # Reconnect button on right
+        reconnect_btn = ttk.Button(bottom_frame, text="Reconnect", command=self.reconnect)
+        reconnect_btn.pack(side="right")
 
     def update_meter_gui(self, m, value):
         var = self.meter_labels[m]
