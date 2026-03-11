@@ -142,11 +142,30 @@ class FTX1MeterMonitor:
         ttk.Label(mode_frame, text="Filter:").pack(side="left", padx=(15, 5))
         ttk.Label(mode_frame, textvariable=self.filter_var, font=("Arial", 10)).pack(side="left")
 
-        msf = ttk.LabelFrame(self.root, text="Meters")
+        # Meters section – split into left (meters) and right (controls) side-by-side
+        msf = ttk.LabelFrame(self.root, text="Meters & Controls")
         msf.pack(fill="both", expand=True, padx=10, pady=6)
-        msf.columnconfigure(0, weight=1)
-        msf.columnconfigure(2, weight=1)
 
+        msf.columnconfigure(0, weight=3)  # left meters take more space
+        msf.columnconfigure(1, weight=0)  # thin vertical separator
+        msf.columnconfigure(2, weight=1)  # right controls
+
+        # Optional thin vertical separator
+        ttk.Separator(msf, orient='vertical').grid(row=0, column=1, sticky='ns', padx=4, pady=4)
+
+        # Left side: meters (same uniform grid as before)
+        left_meter_frame = ttk.Frame(msf)
+        left_meter_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 4), pady=6)
+
+        left_meter_frame.columnconfigure(0, weight=0)
+        left_meter_frame.columnconfigure(1, weight=1)
+
+        ROW_PADY = 4
+        LABEL_MINSIZE = 24
+        BAR_MINSIZE = 16
+        BAR_WIDTH = 180
+
+        row = 0
         pretty_left = {
             "STRENGTH": "S-Meter",
             "PO": "PO",
@@ -157,69 +176,116 @@ class FTX1MeterMonitor:
             "ID": "ID",
         }
 
-        row = 0
-        for m in self.left_meters:  # iterates in dict order: STRENGTH → ID
+        for m in self.left_meters:
             label_text = pretty_left.get(m, m)
-            ttk.Label(msf, text=f"{label_text}:").grid(row=row, column=0, sticky="e", padx=(10, 4), pady=(6, 1))
+
+            left_meter_frame.rowconfigure(row, weight=0, minsize=LABEL_MINSIZE)
+
+            ttk.Label(left_meter_frame, text=f"{label_text}:").grid(
+                row=row, column=0, sticky="e", padx=(10, 4), pady=(ROW_PADY, 1)
+            )
 
             var = tk.StringVar(value="—")
             self.meter_labels[m] = var
-            ttk.Label(msf, textvariable=var, font=("Arial", 11, "bold"), width=12, anchor="w").grid(
-                row=row, column=1, sticky="w", padx=6)
+            ttk.Label(
+                left_meter_frame,
+                textvariable=var,
+                font=("Arial", 11, "bold"),
+                width=12,
+                anchor="w"
+            ).grid(row=row, column=1, sticky="w", padx=6, pady=(ROW_PADY, 1))
 
-            canvas = tk.Canvas(msf, width=120, height=self.bar_height, bg="#222", highlightthickness=0)
-            canvas.grid(row=row + 1, column=1, sticky="w", padx=6, pady=(0, 8))
+            left_meter_frame.rowconfigure(row + 1, weight=0, minsize=BAR_MINSIZE)
+
+            canvas = tk.Canvas(
+                left_meter_frame,
+                width=BAR_WIDTH,
+                height=self.bar_height,
+                bg="#222",
+                highlightthickness=0
+            )
+            canvas.grid(
+                row=row + 1,
+                column=1,
+                sticky="w",
+                padx=6,
+                pady=(1, ROW_PADY + 2)
+            )
             self.bar_canvases[m] = canvas
             self.smoothed_values[m] = 0.0
 
             row += 2
 
-        # Right column — Controls (unchanged, sits neatly at the top)
-        ttk.Label(msf, text="Power (W):").grid(row=0, column=2, sticky="e", padx=(8, 2), pady=4)
-        self.power_spin = tk.Spinbox(msf, from_=0.5, to=10.0, increment=0.1, textvariable=self.power_var, width=6,
+        # Right side: all controls in a dedicated frame (no row conflict)
+        right_controls_frame = ttk.Frame(msf)
+        right_controls_frame.grid(row=0, column=2, sticky="n", padx=(20, 10), pady=8)
+
+        right_row = 0
+        RIGHT_PADY = 8
+
+        ttk.Label(right_controls_frame, text="Power (W):").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                                pady=RIGHT_PADY)
+        self.power_spin = tk.Spinbox(right_controls_frame, from_=0.5, to=10.0, increment=0.1,
+                                     textvariable=self.power_var, width=6,
                                      command=self.apply_controls)
-        self.power_spin.grid(row=0, column=3, sticky="w", padx=5)
+        self.power_spin.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
+        right_row += 1
 
-        ttk.Label(msf, text="Preamp:").grid(row=1, column=2, sticky="e", padx=(8, 2), pady=4)
-        self.preamp_combo = ttk.Combobox(msf, textvariable=self.preamp_var, values=["IPO", "AMP1", "AMP2"],
+        ttk.Label(right_controls_frame, text="Preamp:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                             pady=RIGHT_PADY)
+        self.preamp_combo = ttk.Combobox(right_controls_frame, textvariable=self.preamp_var,
+                                         values=["IPO", "AMP1", "AMP2"],
                                          state="readonly", width=8)
-        self.preamp_combo.grid(row=1, column=3, sticky="w", padx=5)
+        self.preamp_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.preamp_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+        right_row += 1
 
-        ttk.Label(msf, text="ATT:").grid(row=2, column=2, sticky="e", padx=(8, 2), pady=4)
-        self.att_combo = ttk.Combobox(msf, textvariable=self.att_var, values=["Off", "-6 dB", "-12 dB", "-18 dB"],
+        ttk.Label(right_controls_frame, text="ATT:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                          pady=RIGHT_PADY)
+        self.att_combo = ttk.Combobox(right_controls_frame, textvariable=self.att_var,
+                                      values=["Off", "-6 dB", "-12 dB", "-18 dB"],
                                       state="readonly", width=8)
-        self.att_combo.grid(row=2, column=3, sticky="w", padx=5)
+        self.att_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.att_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+        right_row += 1
 
-        ttk.Label(msf, text="Squelch:").grid(row=3, column=2, sticky="e", padx=(8, 2), pady=4)
-        self.sql_spin = tk.Spinbox(msf, from_=0.0, to=1.0, increment=0.05, textvariable=self.sql_var, width=6,
+        ttk.Label(right_controls_frame, text="Squelch:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                              pady=RIGHT_PADY)
+        self.sql_spin = tk.Spinbox(right_controls_frame, from_=0.0, to=1.0, increment=0.05, textvariable=self.sql_var,
+                                   width=6,
                                    command=self.apply_controls)
-        self.sql_spin.grid(row=3, column=3, sticky="w", padx=5)
+        self.sql_spin.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
+        right_row += 1
 
-        ttk.Label(msf, text="AGC:").grid(row=4, column=2, sticky="e", padx=(8, 2), pady=4)
-        self.agc_combo = ttk.Combobox(msf, textvariable=self.agc_var, values=["Off", "Fast", "Medium", "Slow", "Auto"],
+        ttk.Label(right_controls_frame, text="AGC:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                          pady=RIGHT_PADY)
+        self.agc_combo = ttk.Combobox(right_controls_frame, textvariable=self.agc_var,
+                                      values=["Off", "Fast", "Medium", "Slow", "Auto"],
                                       state="readonly", width=10)
-        self.agc_combo.grid(row=4, column=3, sticky="w", padx=5)
+        self.agc_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.agc_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+        right_row += 1
 
-        ttk.Label(msf, text="Noise Red. (NR):").grid(row=5, column=2, sticky="e", padx=(8, 2), pady=4)
-        self.nr_combo = ttk.Combobox(msf, textvariable=self.nr_var,
+        ttk.Label(right_controls_frame, text="Noise Red. (NR):").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                                      pady=RIGHT_PADY)
+        self.nr_combo = ttk.Combobox(right_controls_frame, textvariable=self.nr_var,
                                      values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly",
                                      width=8)
-        self.nr_combo.grid(row=5, column=3, sticky="w", padx=5)
+        self.nr_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.nr_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+        right_row += 1
 
-        ttk.Label(msf, text="Noise Bl. (NB):").grid(row=6, column=2, sticky="e", padx=(8, 2), pady=4)
-        self.nb_combo = ttk.Combobox(msf, textvariable=self.nb_var,
+        ttk.Label(right_controls_frame, text="Noise Bl. (NB):").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                                     pady=RIGHT_PADY)
+        self.nb_combo = ttk.Combobox(right_controls_frame, textvariable=self.nb_var,
                                      values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly",
                                      width=8)
-        self.nb_combo.grid(row=6, column=3, sticky="w", padx=5)
+        self.nb_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.nb_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
         # Reconnect button
         reconnect_btn = ttk.Button(self.root, text="Reconnect", command=self.reconnect)
-        reconnect_btn.pack(pady=10)
+        reconnect_btn.pack(pady=8)
 
     def update_meter_gui(self, m, value):
         var = self.meter_labels[m]
@@ -751,4 +817,3 @@ if __name__ == "__main__":
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 4532
     app = FTX1MeterMonitor(host, port)
     app.root.mainloop()
-
