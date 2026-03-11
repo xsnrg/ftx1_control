@@ -632,29 +632,37 @@ class FTX1MeterMonitor:
             return None
 
     def get_hamlib_level(self, cmd):
+
         if not self.sock:
+            print(f"get_hamlib_level: no socket for {cmd}")
             return None
+
         try:
-            self.sock.sendall(f"{cmd}\n".encode())
-            response = ""
-            while True:
-                data = self.sock.recv(1024).decode(errors='ignore')
-                if not data:
-                    break
-                response += data
-                if "RPRT" in response:
-                    break  # Hamlib ends with RPRT line
+            # Use the existing rig_cmd that already works well
+            resp = self.rig_cmd(cmd)
 
-            if "RPRT 0" not in response:
-                return None  # error
+            if resp is None:
+                return None
 
-            # Extract value line (before RPRT)
-            lines = response.splitlines()
-            value_line = lines[0].strip() if lines else ""
-            return value_line  # return as str, e.g. "0.450000"
+            resp = resp.strip()
+
+            # Check for error response
+            if "RPRT" in resp:
+                if "RPRT 0" not in resp:
+                    print(f"get_hamlib_level: error response for {cmd}: {resp}")
+                    return None
+                # Extract just the value line (before RPRT)
+                lines = resp.splitlines()
+                if lines:
+                    return lines[0].strip()
+                else:
+                    return None
+
+            # If no RPRT at all (unusual but possible), assume whole response is value
+            return resp
 
         except Exception as e:
-            print(f"Level fetch error for {cmd}: {e}")
+            print(f"get_hamlib_level exception for {cmd}: {e}")
             return None
 
     def update_readings(self):
@@ -673,34 +681,47 @@ class FTX1MeterMonitor:
             # Drain any stale data at the start of each poll cycle
             self._drain_socket()
 
+            # Frequency
             f = self.rig_cmd("f")
-            if f and f.replace(".", "").isdigit():
-                self.freq_var.set(f"{float(f) / 1_000_000:.6f} MHz")
+            if f and f.replace(".", "").replace("-", "").isdigit():
+                try:
+                    freq_mhz = float(f) / 1_000_000
+                    self.freq_var.set(f"{freq_mhz:.6f} MHz")
+                except ValueError:
+                    self.freq_var.set("—")
 
+            # Mode + Filter
             mode_lines = self.rig_cmd_lines("m", num_lines=2)
-            if mode_lines:
-                self.mode_var.set(mode_lines[0].strip() if len(mode_lines) > 0 else "—")
-                self.filter_var.set(mode_lines[1].strip() + " Hz" if len(mode_lines) > 1 else "—")
+            if mode_lines and len(mode_lines) >= 2:
+                self.mode_var.set(mode_lines[0].strip() or "—")
+                self.filter_var.set(f"{mode_lines[1].strip()} Hz" or "—")
+            elif mode_lines:
+                self.mode_var.set(mode_lines[0].strip() or "—")
+                self.filter_var.set("—")
 
+            # Meters
             for name, cfg in self.left_meters.items():
                 raw_str = self.get_hamlib_level(cfg["hamlib_cmd"])
+
                 if raw_str is None:
                     self.update_meter_gui(name, 0.0)
                     continue
 
                 try:
                     raw = float(raw_str)
-                except ValueError:
+                except (ValueError, TypeError):
+                    print(f"Meter {name} conversion failed: {raw_str!r}")
                     self.update_meter_gui(name, 0.0)
                     continue
 
                 value = cfg["scale"](raw)
 
+                # Skip display if tx-only meter and value is zero (likely not transmitting)
                 if cfg.get("tx_only", False) and value <= 0.0:
                     self.update_meter_gui(name, 0.0)
                     continue
 
-                # No smoothing — use raw scaled value directly
+                # Display the scaled value directly (no smoothing)
                 self.update_meter_gui(name, value)
 
         except Exception as e:
@@ -708,6 +729,8 @@ class FTX1MeterMonitor:
 
         # Status line
         self.status_var.set("Connected ✓")
+
+        # Schedule next update
         self.root.after(1000, self.update_readings)
 
     def reconnect(self):
@@ -728,3 +751,4 @@ if __name__ == "__main__":
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 4532
     app = FTX1MeterMonitor(host, port)
     app.root.mainloop()
+
