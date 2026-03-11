@@ -19,22 +19,64 @@ class FTX1MeterMonitor:
         self.sock = None
 
         self.root = tk.Tk()
-        self.root.title("FTX-1 Meter Monitor v1.3 - Raw RM Meters")
+        self.root.title("FTX-1 Meter Monitor v1.3 - Hamlib Meters")
         self.root.geometry("540x480")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
 
         self.status_var = tk.StringVar(value=f"Connecting to {host}:{port}...")
 
-        # Raw RM meters using correct Yaesu CAT codes (bypasses Hamlib bug)
+        # Standard Hamlib level tokens (requires Hamlib with PR #2010 FTX-1 fixes)
         self.left_meters = {
-            "STRENGTH": {"rm": 1, "scale": lambda r: r / 2.55, "tx_only": False, "fmt": "{:.0f} dB", "max": 100},
-            "PO": {"rm": 5, "scale": lambda r: r / 2.55, "tx_only": True, "fmt": "{:.1f} W", "max": 100},
-            "SWR": {"rm": 6, "scale": lambda r: 1.0 + (r / 50.0), "tx_only": True, "fmt": "{:.2f}:1", "max": 5.0},
-            "ALC": {"rm": 4, "scale": lambda r: min(r / 25.5, 10.0), "tx_only": True, "fmt": "{:.1f}", "max": 10.0},
-            "COMP": {"rm": 3, "scale": lambda r: r / 2.55, "tx_only": True, "fmt": "{:.0f}%", "max": 100},
-            "VDD": {"rm": 8, "scale": lambda r: r / 15, "tx_only": False, "fmt": "{:.1f} V", "max": 15.0},
-            "ID": {"rm": 7, "scale": lambda r: r / 25.5, "tx_only": True, "fmt": "{:.1f} A", "max": 10.0},
+            "STRENGTH": {
+                "hamlib_cmd": "l STRENGTH",
+                "scale": lambda r: r,  # dB (negative typical); add converter for S-units if desired
+                "tx_only": False,
+                "fmt": "{:.0f} dB",
+                "max": 20  # for bar graph (focus on positive/strong signals)
+            },
+            "PO": {
+                "hamlib_cmd": "l RFPOWER_METER_WATTS",
+                "scale": lambda r: r * 10,  # 0-1 → 0-10W (Field max); change to *6 if battery-only
+                "tx_only": True,
+                "fmt": "{:.1f} W",
+                "max": 10  # Field version scale
+            },
+            "SWR": {
+                "hamlib_cmd": "l SWR",
+                "scale": lambda r: r,
+                "tx_only": True,
+                "fmt": "{:.2f}:1",
+                "max": 5.0
+            },
+            "ALC": {
+                "hamlib_cmd": "l ALC",
+                "scale": lambda r: r * 10,  # 0-1 → 0-10 scale (common on Yaesu)
+                "tx_only": True,
+                "fmt": "{:.1f}",
+                "max": 10.0
+            },
+            "COMP": {
+                "hamlib_cmd": "l COMP",
+                "scale": lambda r: r * 100,  # if 0-1 → percent (AMC on FTX-1)
+                "tx_only": True,
+                "fmt": "{:.0f}%",
+                "max": 100
+            },
+            "VDD": {
+                "hamlib_cmd": "l VD_METER",  # or try "l VDD" if alias
+                "scale": lambda r: r,
+                "tx_only": False,
+                "fmt": "{:.1f} V",
+                "max": 15.0  # battery/external supply
+            },
+            "ID": {
+                "hamlib_cmd": "l ID_METER",
+                "scale": lambda r: r,
+                "tx_only": True,
+                "fmt": "{:.1f} A",
+                "max": 5.0  # low current on Field (higher with Optima amp)
+            },
         }
 
         self.meter_labels = {}
@@ -59,9 +101,6 @@ class FTX1MeterMonitor:
         self.last_set = {}
         self.ignore_readback_until = 0.0
 
-        self.build_gui()
-        self.connect_to_rig()
-
         self.startup_sync_done = False
         self.startup_retries = 0
         self.max_startup_retries = 5
@@ -69,7 +108,7 @@ class FTX1MeterMonitor:
         self.sync_in_progress = False
         self.last_user_change_time = time.time()  # init to now to skip early periodic
         self.last_control_sync_time = 0.0
-        self.control_sync_interval = 20.0  # seconds
+        self.control_sync_interval = 10.0  # seconds
         self.user_debounce_sec = 8.0  # ignore periodic after app change
 
         self.build_gui()
@@ -77,7 +116,7 @@ class FTX1MeterMonitor:
         print("Connect done — waiting 2s before first sync")
         self.root.after(2000, self._startup_control_sync)
 
-        self.root.after(600, self._perform_control_sync)  # startup only
+        self.root.after(1000, self._perform_control_sync)  # startup only
 
     def build_gui(self):
         ttk.Label(self.root, textvariable=self.status_var, font=("Arial", 9)).pack(pady=(8, 4))
@@ -210,71 +249,87 @@ class FTX1MeterMonitor:
         self.sync_in_progress = True
         success = 0
 
-        # Your try_set helper (keep or inline)
-        def try_set(var, resp, parser=float, setter=None):
+        # Helper: try to parse response and set var/setter
+        def try_set(var, resp, parser=float, setter=None, scale=None):
             nonlocal success
-            if not resp or not resp.strip() or "RPRT" in resp:
+            if not resp or not resp.strip() or "RPRT" in resp or "Error" in resp:
                 return
             try:
-                val = parser(resp.strip())
+                raw = float(resp.strip())  # most levels are float
+                if scale:
+                    val = scale(raw)
+                else:
+                    val = parser(raw)
                 if setter:
                     setter(val)
                 else:
                     var.set(val)
                 success += 1
-            except:
-                pass
+            except (ValueError, TypeError):
+                pass  # silent fail on bad parse
 
-        # RFPOWER (scale to 0.5-10 W as per your spinbox)
+        # RFPOWER: 0.0-1.0 → watts (clamp 0.5-10)
         resp = self.rig_cmd("l RFPOWER")
         print(f"l RFPOWER → {resp}")
-        try_set(self.power_var, resp, lambda s: max(0.5, min(10.0, round(float(s) * 10, 1))))
+        try_set(self.power_var, resp, parser=float,
+                scale=lambda r: max(0.5, min(10.0, round(r * 10, 1))))
 
-        # PREAMP (0=IPO, 1=AMP1, 2=AMP2)
+        # PREAMP: 0=IPO, 1=AMP1, 2=AMP2
         resp = self.rig_cmd("l PREAMP")
         print(f"l PREAMP → {resp}")
 
         def set_preamp(v):
             map_ = {0: "IPO", 1: "AMP1", 2: "AMP2"}
-            self.preamp_var.set(map_.get(int(v), "IPO"))
+            self.preamp_var.set(map_.get(int(round(v)), "IPO"))  # round if float
 
-        try_set(None, resp, parser=int, setter=set_preamp)
+        try_set(None, resp, parser=float, setter=set_preamp)
 
-        # ATT (0=Off, 6=-6, 12=-12, 18=-18)
+        # ATT: 0=Off, 6=-6, 12=-12, 18=-18
         resp = self.rig_cmd("l ATT")
         print(f"l ATT → {resp}")
 
         def set_att(v):
             map_ = {0: "Off", 6: "-6 dB", 12: "-12 dB", 18: "-18 dB"}
-            self.att_var.set(map_.get(int(v), "Off"))
+            self.att_var.set(map_.get(int(round(v)), "Off"))
 
-        try_set(None, resp, parser=int, setter=set_att)
+        try_set(None, resp, parser=float, setter=set_att)
 
-        # SQL (0-1 float)
+        # SQL: 0.0-1.0 float
         resp = self.rig_cmd("l SQL")
         print(f"l SQL → {resp}")
-        try_set(self.sql_var, resp)
+        try_set(self.sql_var, resp, parser=float)
 
-        # AGC (0=Off, 1=Fast, 2=Medium, 3=Slow, 4=Auto ? — adjust map if needed)
+        # AGC: 0=Off,1=Fast,2=Medium,3=Slow,4=Auto (confirm with your rig)
         resp = self.rig_cmd("l AGC")
         print(f"l AGC → {resp}")
 
         def set_agc(v):
             map_ = {0: "Off", 1: "Fast", 2: "Medium", 3: "Slow", 4: "Auto"}
-            self.agc_var.set(map_.get(int(v), "Off"))
+            self.agc_var.set(map_.get(int(round(v)), "Off"))
 
-        try_set(None, resp, parser=int, setter=set_agc)
+        try_set(None, resp, parser=float, setter=set_agc)
 
-        # NR (likely 0-1 scaled, but your values show 0.0666667 → perhaps 1/15?)
+        # NR (DNR): 0.0-1.0 → map to 0="Off", 1-10
         resp = self.rig_cmd("l NR")
         print(f"l NR → {resp}")
-        try_set(self.nr_var, resp)  # keep as str or map to int 0-9 if needed
 
-        # NB (0-1 or 0-9?)
+        def set_nr(raw):
+            level = int(round(raw * 10))  # 0.0→0, 0.0667→1 (if ~1/15 but CAT is /10), up to 1.0→10
+            nr_str = "Off" if level <= 0 else str(min(10, max(0, level)))
+            self.nr_var.set(nr_str)
+
+        try_set(None, resp, parser=float, setter=set_nr)
+
+        # NB: assume 0.0-1.0 normalized → scale to int 0-10 (adjust if your poll shows different)
         resp = self.rig_cmd("l NB")
         print(f"l NB → {resp}")
-        try_set(self.nb_var, resp)
 
+        def set_nb(raw):
+            level = int(round(raw * 10))  # common mapping; if 0-100, change to round(raw)
+            nb_str = "Off" if level <= 0 else str(min(10, max(0, level)))
+            self.nb_var.set(nb_str)
+
+        try_set(None, resp, parser=float, setter=set_nb)
 
         self.sync_in_progress = False
         self.last_control_sync_time = now
@@ -310,7 +365,7 @@ class FTX1MeterMonitor:
 
         power_w = self.power_var.get()
         power_raw = power_w / 10.0
-        self.rig_cmd(f"L RFPOWER {power_raw:.4f}")
+        self.rig_cmd(f"L RFPOWER {power_raw:.2f}")
         self.last_set["power"] = power_raw
 
         sql_val = self.sql_var.get()
@@ -322,10 +377,24 @@ class FTX1MeterMonitor:
         self.rig_cmd(f"L AGC {agc_val}")
         self.last_set["agc"] = agc_val
 
-        nr_display = self.nr_var.get()
-        nr_val = 0 if nr_display == "Off" else int(nr_display)
-        self.rig_cmd(f"L NR {nr_val / 9.0:.2f}")
-        self.last_set["nr"] = nr_val
+        # --- Fixed NR handling ---
+        nr_display = self.nr_var.get()          # Assume this is a StringVar like "Off", "1", "2", ..., "10"
+        if nr_display == "Off":
+            nr_int = 0
+        else:
+            try:
+                nr_int = int(nr_display)        # User sees/selects clean integers 1–10
+                if not 1 <= nr_int <= 10:
+                    nr_int = 0                  # Clamp invalid to off
+            except ValueError:
+                nr_int = 0                      # Fallback
+
+        # Hamlib expects 0.0 (off) to 1.0 (max=level 10)
+        # So map: 0→0.0, 1→0.1, ..., 10→1.0
+        nr_normalized = nr_int / 10.0
+
+        self.rig_cmd(f"L NR {nr_normalized:.4f}")   # Consistent precision
+        self.last_set["nr"] = nr_normalized         # Or store nr_int if you prefer
 
         nb_display = self.nb_var.get()
         nb_val = 0 if nb_display == "Off" else int(nb_display)
@@ -441,13 +510,120 @@ class FTX1MeterMonitor:
             self.sock = None
             return False
 
+    def _read_line(self):
+        """Read exactly one \\n-terminated line from the socket, byte by byte."""
+        buf = ""
+        while True:
+            chunk = self.sock.recv(1).decode('ascii', errors='ignore')
+            if not chunk or chunk == "\n":
+                break
+            buf += chunk
+        return buf.strip()
+
+    def _drain_socket(self):
+        """Non-blocking drain of any stale data in the socket buffer."""
+        drained = b""
+        self.sock.setblocking(False)
+        try:
+            while True:
+                stale = self.sock.recv(256)
+                if not stale:
+                    break
+                drained += stale
+        except BlockingIOError:
+            pass
+        finally:
+            self.sock.setblocking(True)
+            self.sock.settimeout(5.0)
+        if drained:
+            print(f"  drained stale: {drained!r}")
+        return drained
+
     def rig_cmd(self, cmd):
+        """Send a command using simple protocol. Read one line response.
+        Validates that the response looks reasonable before returning."""
         if not self.sock: return None
         try:
             self.sock.sendall((cmd + "\n").encode('ascii'))
-            resp = self.sock.recv(1024).decode('ascii', errors='ignore').strip()
+            resp = self._read_line()
+            if not resp:
+                return None
             if "RPRT" in resp:
-                resp = resp.split("RPRT", 1)[0].strip()
+                try:
+                    code = int(resp.split("RPRT")[1].strip())
+                    if code != 0:
+                        print(f"rig_cmd('{cmd}') error: RPRT {code}")
+                except ValueError:
+                    pass
+                return None
+            return resp
+        except Exception as e:
+            print(f"Command failed: {cmd} → {e}")
+            self.sock = None
+            self.status_var.set("Connection dropped - reconnecting...")
+            return None
+
+    def rig_cmd_lines(self, cmd, num_lines=2):
+        """Send a command that returns multiple response lines (simple protocol).
+        Drains socket first to ensure clean state, then reads expected lines.
+
+        Handles both newline-separated responses (default rigctld)
+        and custom-separator responses (rigctld -S <char>).
+        """
+        if not self.sock: return None
+        try:
+            # Drain stale data to resync before multi-line read
+            self._drain_socket()
+
+            self.sock.sendall((cmd + "\n").encode('ascii'))
+            lines = []
+            attempts = 0
+            while len(lines) < num_lines and attempts < num_lines + 4:
+                attempts += 1
+                line = self._read_line()
+                if not line:
+                    continue
+                if "RPRT" in line:
+                    try:
+                        code = int(line.split("RPRT")[1].strip())
+                        if code != 0:
+                            print(f"rig_cmd_lines('{cmd}') error: RPRT {code}")
+                    except ValueError:
+                        pass
+                    break
+                lines.append(line)
+            # Handle custom separator on a single line
+            if len(lines) == 1 and len(lines[0]) > 0:
+                for sep in ['$', '@', '|', ';']:
+                    if sep in lines[0]:
+                        lines = [part.strip() for part in lines[0].split(sep)]
+                        break
+            return lines if lines else None
+        except Exception as e:
+            print(f"Command failed: {cmd} → {e}")
+            self.sock = None
+            self.status_var.set("Connection dropped - reconnecting...")
+            return None
+
+    def rig_cmd_extended(self, cmd):
+        """Send a command using extended protocol (+). For multi-line responses."""
+        if not self.sock: return None
+        try:
+            self.sock.sendall(("+" + cmd + "\n").encode('ascii'))
+            result_lines = []
+            while True:
+                line = self._read_line()
+                if "RPRT" in line:
+                    break
+                # Skip the echo/command line (e.g. "get_mode:")
+                # It ends with ':' but has no value after it
+                if line.endswith(":"):
+                    continue
+                # Extended responses have "Key: Value" format — extract the value
+                if ": " in line:
+                    line = line.split(": ", 1)[1]
+                result_lines.append(line)
+            resp = "\n".join(result_lines)
             return resp if resp else None
         except Exception as e:
             print(f"Command failed: {cmd} → {e}")
@@ -455,28 +631,22 @@ class FTX1MeterMonitor:
             self.status_var.set("Connection dropped - reconnecting...")
             return None
 
-    def get_raw_meter(self, rm_num):
-        """Read raw Yaesu RM meter value (0-255). Robust against real responses like 'RM7070000;'."""
+    def get_hamlib_level(self, hamlib_cmd):
+        """Read a meter value using a standard Hamlib 'l' (get_level) command."""
         try:
-            resp = self.rig_cmd(f"w RM{rm_num};")
-            if not resp or not resp.startswith(f"RM{rm_num}") or ";" not in resp:
-                return 0
-
-            # Extract first 3 digits after "RMx" — works for RM7070000;, RM5123000;, etc.
-            data = resp[len(f"RM{rm_num}"):].split(';')[0].strip()
-            if len(data) >= 3 and data[:3].isdigit():
-                raw = int(data[:3])
-                # print(f"DEBUG RM{rm_num} → raw={raw} (resp={repr(resp)})")  # uncomment during testing
-                return raw
-            return 0
+            resp = self.rig_cmd(hamlib_cmd)
+            if not resp or not resp.strip():
+                return 0.0
+            return float(resp.strip())
         except Exception as e:
-            print(f"RM{rm_num} read error: {e}")
-            return 0
+            print(f"Hamlib level '{hamlib_cmd}' read error: {e}")
+            return 0.0
 
     def update_readings(self):
         now = time.time()
         if now - self.last_control_sync_time > self.control_sync_interval:
-            self._perform_control_sync()  # non-force = respects debounce
+            if time.time() >= self.ignore_readback_until:
+                self._perform_control_sync()
 
         if not self.sock:
             self.status_var.set("Disconnected — retrying...")
@@ -485,38 +655,37 @@ class FTX1MeterMonitor:
             return
 
         try:
-            # --- 1. Basic status (freq + mode) ---
+            # Drain any stale data at the start of each poll cycle
+            self._drain_socket()
+
             f = self.rig_cmd("f")
             if f and f.replace(".", "").isdigit():
                 self.freq_var.set(f"{float(f) / 1_000_000:.6f} MHz")
 
-            m = self.rig_cmd("m")
-            if m:
-                parts = m.split()
-                self.mode_var.set(parts[0] if parts else "—")
-                self.filter_var.set(parts[1] + " Hz" if len(parts) > 1 else "—")
-
-            if time.time() >= self.ignore_readback_until:
-                self._perform_control_sync()
-
-            po_raw = self.get_raw_meter(5)                # RM5 = PO
-            is_tx = po_raw > 8                            # ~3% of scale = transmitting
+            mode_lines = self.rig_cmd_lines("m", num_lines=2)
+            if mode_lines:
+                self.mode_var.set(mode_lines[0].strip() if len(mode_lines) > 0 else "—")
+                self.filter_var.set(mode_lines[1].strip() + " Hz" if len(mode_lines) > 1 else "—")
 
             for name, cfg in self.left_meters.items():
-                if cfg.get("tx_only", False) and not is_tx:
+                raw_str = self.get_hamlib_level(cfg["hamlib_cmd"])
+                if not raw_str or "RPRT" in raw_str or "Error" in raw_str:
                     self.update_meter_gui(name, 0.0)
-                    self.smoothed_values[name] = 0.0
                     continue
 
-                raw = self.get_raw_meter(cfg["rm"])
+                try:
+                    raw = float(raw_str.strip())
+                except (ValueError, TypeError):
+                    raw = 0.0
+
                 value = cfg["scale"](raw)
 
-                # EMA smoothing
-                prev = self.smoothed_values[name]
-                smoothed = self.smoothing_alpha * prev + (1 - self.smoothing_alpha) * value
-                self.smoothed_values[name] = smoothed
+                if cfg.get("tx_only", False) and value <= 0.0:
+                    self.update_meter_gui(name, 0.0)
+                    continue
 
-                self.update_meter_gui(name, smoothed)
+                # No smoothing — use raw scaled value directly
+                self.update_meter_gui(name, value)
 
         except Exception as e:
             print(f"Poll cycle error: {e}")
@@ -530,7 +699,6 @@ class FTX1MeterMonitor:
         self.status_var.set("Reconnecting...")
 
     def quit_app(self):
-        """Clean shutdown when window is closed"""
         if hasattr(self, 'sock') and self.sock:
             try:
                 self.sock.close()
