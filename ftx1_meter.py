@@ -37,7 +37,7 @@ class FTX1MeterMonitor:
             },
             "PO": {
                 "hamlib_cmd": "l RFPOWER_METER_WATTS",
-                "scale": lambda r: r * 10,  # 0-1 → 0-10W (Field max); change to *6 if battery-only
+                "scale": lambda r: r / 10,
                 "tx_only": True,
                 "fmt": "{:.1f} W",
                 "max": 10  # Field version scale
@@ -65,17 +65,17 @@ class FTX1MeterMonitor:
             },
             "VDD": {
                 "hamlib_cmd": "l VD_METER",  # or try "l VDD" if alias
-                "scale": lambda r: r,
+                "scale": lambda r: r / 1.04,
                 "tx_only": False,
                 "fmt": "{:.1f} V",
                 "max": 15.0  # battery/external supply
             },
             "ID": {
                 "hamlib_cmd": "l ID_METER",
-                "scale": lambda r: r,
+                "scale": lambda r: r / 10,
                 "tx_only": True,
                 "fmt": "{:.1f} A",
-                "max": 5.0  # low current on Field (higher with Optima amp)
+                "max": 4.0  # low current on Field (higher with Optima amp)
             },
         }
 
