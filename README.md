@@ -46,8 +46,6 @@ python3 ftx1_meter.py
 
 ### Known Limitations
 
-Power setting is read-only (Hamlib FTX-1 backend does not yet support L RFPOWER reliably)
-Preamp and ATT are read-only (set commands return "Invalid parameter")
 PRESET command (X) times out — not currently functional
 Some levels may have scaling quirks due to early Hamlib support for FTX-1
 
@@ -55,10 +53,8 @@ Some levels may have scaling quirks due to early Hamlib support for FTX-1
 
 TX detect (highlight TX meters when PO > 0.1 W)
 Graphical gauges (circular S-meter, vertical PO/SWR)
-CSV logging of TX metrics (power/SWR/ALC over time)
 Config file (host/port, window position, defaults)
 Tooltips & help labels for controls
-Error handling polish (reconnect button, status icons)
 
 
 ### Contributing
