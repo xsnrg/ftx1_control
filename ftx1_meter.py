@@ -96,7 +96,6 @@ class FTX1MeterMonitor:
         self.nb_var = tk.StringVar()
         self.mode_var = tk.StringVar()
         self.filter_var = tk.StringVar(value="—")
-        self.preset_var = tk.BooleanVar(value=False)
 
         self.last_set = {}
         self.ignore_readback_until = 0.0
@@ -130,16 +129,19 @@ class FTX1MeterMonitor:
         mode_frame = ttk.Frame(sf)
         mode_frame.grid(row=1, column=1, sticky="w")
         mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var,
-                                  values=["PRESET", "PKTUSB", "PKTLSB", "USB", "LSB", "CW-U", "CW-L", "AM", "FM",
+                                  values=["PKTUSB", "PKTLSB", "USB", "LSB", "CW-U", "CW-L", "AM", "FM",
                                           "RTTY", "DATA-U", "DATA-L"], state="readonly", width=12)
         mode_combo.pack(side="left")
         mode_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
-        self.preset_check = ttk.Checkbutton(mode_frame, text="PRESET", variable=self.preset_var,
-                                            command=self.apply_controls)
-        self.preset_check.pack(side="left", padx=8)
 
-        ttk.Label(mode_frame, text="Filter:").pack(side="left", padx=(15, 5))
-        ttk.Label(mode_frame, textvariable=self.filter_var, font=("Arial", 10)).pack(side="left")
+        ttk.Label(mode_frame, text="Bandwidth:").pack(side="left", padx=(15, 5))
+
+        self.bw_entry = ttk.Entry(mode_frame, width=8, justify="right", font=("Arial", 10))
+        self.bw_entry.pack(side="left", padx=(5, 0))
+        self.bw_entry.bind("<Return>", self.set_bandwidth)
+        self.bw_entry.bind("<FocusOut>", self.set_bandwidth)
+
+        ttk.Label(mode_frame, text="Hz").pack(side="left", padx=(2, 10))
 
         # Meters & Controls section – side-by-side layout
         msf = ttk.LabelFrame(self.root, text="Meters & Controls")
@@ -473,14 +475,38 @@ class FTX1MeterMonitor:
         self.rig_cmd(f"L NB {nb_val}")
         self.last_set["nb"] = nb_val
 
-        if self.preset_var.get():
-            self.rig_cmd("X")
-        mode_str = self.mode_var.get()
-        self.rig_cmd(f"M {mode_str} 0")
-        self.last_set["mode"] = mode_str
-        self.last_set["preset"] = self.preset_var.get()
+        mode_str = self.mode_var.get().strip()
+        if mode_str and mode_str != "—":
+            self.rig_cmd(f"M {mode_str}")  # Sets mode; bandwidth unchanged unless rig resets
+            self.last_set["mode"] = mode_str
+            self.status_var.set("Mode applied")
 
         self.status_var.set("Changes applied")
+
+    def set_bandwidth(self, event=None):
+        """Set custom bandwidth via M MODE BW (in Hz)."""
+        try:
+            text = self.bw_entry.get().strip()
+            if not text or text == "—":
+                return
+
+            bw = int(text)
+            if bw < 50 or bw > 16000:  # adjust range to your rig's allowed (e.g., max 4000 for SSB?)
+                raise ValueError("Bandwidth out of range")
+
+            mode = self.mode_var.get().strip()
+            if not mode or mode == "—":
+                raise ValueError("No mode selected")
+
+            self.rig_cmd(f"M {mode} {bw}")
+            self.last_user_change_time = time.time()
+            self.status_var.set(f"Bandwidth set to {bw} Hz")
+
+            # Optional: force quick poll to confirm
+            self.root.after(300, self.update_readings)
+
+        except ValueError as e:
+            self.status_var.set(f"Invalid BW: {e}")
 
     def format_smeter(self, raw_str):
         try:
@@ -765,8 +791,17 @@ class FTX1MeterMonitor:
             # Mode + Filter
             mode_lines = self.rig_cmd_lines("m", num_lines=2)
             if mode_lines and len(mode_lines) >= 2:
-                self.mode_var.set(mode_lines[0].strip() or "—")
-                self.filter_var.set(f"{mode_lines[1].strip()} Hz" or "—")
+                mode = mode_lines[0].strip() or "—"
+                bw_str = mode_lines[1].strip()
+                self.mode_var.set(mode)
+                try:
+                    bw_int = int(bw_str)
+                    self.bw_entry.delete(0, tk.END)
+                    self.bw_entry.insert(0, str(bw_int))  # only the number in Entry
+                    self.filter_var.set(f"{bw_int} Hz")  # optional: keep var for reference/status
+                except ValueError:
+                    self.bw_entry.delete(0, tk.END)
+                    self.bw_entry.insert(0, "—")
             elif mode_lines:
                 self.mode_var.set(mode_lines[0].strip() or "—")
                 self.filter_var.set("—")
