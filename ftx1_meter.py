@@ -78,6 +78,46 @@ class FTX1MeterMonitor:
                 "max": 4.0  # low current on Field (higher with Optima amp)
             },
         }
+        # Mode-aware bandwidth options (Hz strings) from Yaesu CAT Table 3 / Operating Manual ranges
+        self.bw_options_by_mode = {
+            "LSB": ["300", "400", "600", "850", "1100", "1200", "1500", "1650", "1800", "1950",
+                    "2100", "2250", "2400", "2450", "2500", "2600", "2700", "2800", "2900",
+                    "3000", "3200", "3500", "4000"],
+            "USB": ["300", "400", "600", "850", "1100", "1200", "1500", "1650", "1800", "1950",
+                    "2100", "2250", "2400", "2450", "2500", "2600", "2700", "2800", "2900",
+                    "3000", "3200", "3500", "4000"],  # same as LSB
+            "CW-U": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
+                     "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
+                     "3500", "4000"],
+            "CW-L": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
+                     "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
+                     "3500", "4000"],  # same as CW-U
+            "RTTY": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
+                     "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
+                     "3500", "4000"],
+            "RTTYR": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
+                      "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
+                      "3500", "4000"],  # RTTY reverse, same
+            "PKTUSB": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
+                       "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
+                       "3500", "4000"],  # DATA/PSK similar to CW
+            "PKTLSB": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
+                       "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
+                       "3500", "4000"],
+            "DATA-U": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
+                       "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
+                       "3500", "4000"],
+            "DATA-L": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
+                       "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
+                       "3500", "4000"],
+            "AM": ["9000"],  # fixed
+            "FM": ["16000"],  # fixed wide
+            # Fallback for any unrecognized mode
+        }
+        # Default fallback list if mode not matched
+        self.default_bw_options = ["50", "100", "150", "200", "250", "300", "400", "500", "600",
+                                   "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
+                                   "3500", "4000"]
 
         self.meter_labels = {}
         self.bar_canvases = {}
@@ -136,10 +176,10 @@ class FTX1MeterMonitor:
 
         ttk.Label(mode_frame, text="Bandwidth:").pack(side="left", padx=(15, 5))
 
-        self.bw_entry = ttk.Entry(mode_frame, width=8, justify="right", font=("Arial", 10))
-        self.bw_entry.pack(side="left", padx=(5, 0))
-        self.bw_entry.bind("<Return>", self.set_bandwidth)
-        self.bw_entry.bind("<FocusOut>", self.set_bandwidth)
+        self.bw_combo = ttk.Combobox(mode_frame, width=8, justify="right", font=("Arial", 10),
+                                     state="readonly")
+        self.bw_combo.pack(side="left", padx=(5, 0))
+        self.bw_combo.bind("<<ComboboxSelected>>", self.set_bandwidth)
 
         ttk.Label(mode_frame, text="Hz").pack(side="left", padx=(2, 10))
 
@@ -147,9 +187,9 @@ class FTX1MeterMonitor:
         msf = ttk.LabelFrame(self.root, text="Meters & Controls")
         msf.pack(fill="both", expand=True, padx=10, pady=6)
 
-        msf.columnconfigure(0, weight=3)   # left meters take more space
-        msf.columnconfigure(1, weight=0)   # thin vertical separator
-        msf.columnconfigure(2, weight=1)   # right controls
+        msf.columnconfigure(0, weight=3)  # left meters take more space
+        msf.columnconfigure(1, weight=0)  # thin vertical separator
+        msf.columnconfigure(2, weight=1)  # right controls
 
         # Thin vertical separator
         ttk.Separator(msf, orient='vertical').grid(row=0, column=1, sticky='ns', padx=4, pady=4)
@@ -294,6 +334,23 @@ class FTX1MeterMonitor:
         # Reconnect button on right
         reconnect_btn = ttk.Button(bottom_frame, text="Reconnect", command=self.reconnect)
         reconnect_btn.pack(side="right")
+
+    def update_bw_combo_options(self):
+        """Update bandwidth combo values based on current mode."""
+        mode = self.mode_var.get().strip()
+        if mode in ["—", ""]:
+            self.bw_combo['values'] = self.default_bw_options
+            return
+
+        # Map similar modes (e.g., PKTUSB → USB-like)
+        key_mode = mode
+        if "PKT" in mode:
+            key_mode = "PKTUSB"  # or map to USB/CW as needed
+        elif "RTTY" in mode:
+            key_mode = "RTTY"
+
+        opts = self.bw_options_by_mode.get(key_mode, self.default_bw_options)
+        self.bw_combo['values'] = opts
 
     def update_meter_gui(self, m, value):
         var = self.meter_labels[m]
@@ -452,23 +509,23 @@ class FTX1MeterMonitor:
         self.last_set["agc"] = agc_val
 
         # --- Fixed NR handling ---
-        nr_display = self.nr_var.get()          # Assume this is a StringVar like "Off", "1", "2", ..., "10"
+        nr_display = self.nr_var.get()  # Assume this is a StringVar like "Off", "1", "2", ..., "10"
         if nr_display == "Off":
             nr_int = 0
         else:
             try:
-                nr_int = int(nr_display)        # User sees/selects clean integers 1–10
+                nr_int = int(nr_display)  # User sees/selects clean integers 1–10
                 if not 1 <= nr_int <= 10:
-                    nr_int = 0                  # Clamp invalid to off
+                    nr_int = 0  # Clamp invalid to off
             except ValueError:
-                nr_int = 0                      # Fallback
+                nr_int = 0  # Fallback
 
         # Hamlib expects 0.0 (off) to 1.0 (max=level 10)
         # So map: 0→0.0, 1→0.1, ..., 10→1.0
         nr_normalized = nr_int / 10.0
 
-        self.rig_cmd(f"L NR {nr_normalized:.4f}")   # Consistent precision
-        self.last_set["nr"] = nr_normalized         # Or store nr_int if you prefer
+        self.rig_cmd(f"L NR {nr_normalized:.4f}")  # Consistent precision
+        self.last_set["nr"] = nr_normalized  # Or store nr_int if you prefer
 
         nb_display = self.nb_var.get()
         nb_val = 0 if nb_display == "Off" else int(nb_display)
@@ -484,29 +541,27 @@ class FTX1MeterMonitor:
         self.status_var.set("Changes applied")
 
     def set_bandwidth(self, event=None):
-        """Set custom bandwidth via M MODE BW (in Hz)."""
+        """User selected a bandwidth from the combo."""
+        bw_str = self.bw_combo.get().strip()
+        if not bw_str or bw_str == "—":
+            return
+
         try:
-            text = self.bw_entry.get().strip()
-            if not text or text == "—":
-                return
-
-            bw = int(text)
-            if bw < 50 or bw > 16000:  # adjust range to your rig's allowed (e.g., max 4000 for SSB?)
-                raise ValueError("Bandwidth out of range")
-
+            bw = int(bw_str)
             mode = self.mode_var.get().strip()
             if not mode or mode == "—":
                 raise ValueError("No mode selected")
 
             self.rig_cmd(f"M {mode} {bw}")
-            self.last_user_change_time = time.time()
+            self.last_user_change_time = time.time()  # prevent poll fight
             self.status_var.set(f"Bandwidth set to {bw} Hz")
 
-            # Optional: force quick poll to confirm
-            self.root.after(300, self.update_readings)
+            # Quick re-poll to confirm rig accepted (e.g., snapped value)
+            self.root.after(400, self.update_readings)
 
         except ValueError as e:
-            self.status_var.set(f"Invalid BW: {e}")
+            self.status_var.set(f"Invalid: {e}")
+            # Poll will revert display soon
 
     def format_smeter(self, raw_str):
         try:
@@ -794,17 +849,17 @@ class FTX1MeterMonitor:
                 mode = mode_lines[0].strip() or "—"
                 bw_str = mode_lines[1].strip()
                 self.mode_var.set(mode)
+
+                # Update options first (mode changed?)
+                self.update_bw_combo_options()
+
                 try:
                     bw_int = int(bw_str)
-                    self.bw_entry.delete(0, tk.END)
-                    self.bw_entry.insert(0, str(bw_int))  # only the number in Entry
-                    self.filter_var.set(f"{bw_int} Hz")  # optional: keep var for reference/status
+                    bw_display = str(bw_int)
+                    # Set combo to exact value if in list, else show it anyway
+                    self.bw_combo.set(bw_display)
                 except ValueError:
-                    self.bw_entry.delete(0, tk.END)
-                    self.bw_entry.insert(0, "—")
-            elif mode_lines:
-                self.mode_var.set(mode_lines[0].strip() or "—")
-                self.filter_var.set("—")
+                    self.bw_combo.set("—")
 
             # Meters
             for name, cfg in self.left_meters.items():
