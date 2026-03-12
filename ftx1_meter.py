@@ -534,9 +534,8 @@ class FTX1MeterMonitor:
 
         mode_str = self.mode_var.get().strip()
         if mode_str and mode_str != "—":
-            self.rig_cmd(f"M {mode_str}")  # Sets mode; bandwidth unchanged unless rig resets
+            self.rig_cmd(f"M {mode_str} 0")  # Include 0 to request default BW for the mode - avoids timeout
             self.last_set["mode"] = mode_str
-            self.status_var.set("Mode applied")
 
         self.status_var.set("Changes applied")
 
