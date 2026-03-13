@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FTX-1 Meter Monitor v1.2.6 - Left meters updated to Hamlib 4.7 supported levels
+FTX-1 Meter Monitor v1.3 - Hamlib Meters with debug logging
 Only STRENGTH, RFPOWER, SWR, ALC, COMP (no more RFPOWER_METER/VD_METER/ID_METER)
 Polling at 1s, send only on user change
 """
@@ -8,12 +8,20 @@ Polling at 1s, send only on user change
 import tkinter as tk
 from tkinter import ttk
 import socket
-import sys
 import time
+import logging
+import argparse
 
 
 class FTX1MeterMonitor:
-    def __init__(self, host="localhost", port=4532):
+    def __init__(self, host="localhost", port=4532, debug=False):
+        # Setup logging
+        self.logger = logging.getLogger("FTX1Meter")
+        self.logger.setLevel(logging.DEBUG if debug else logging.WARNING)
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+        self.logger.addHandler(console_handler)
+
         self.host = host
         self.port = port
         self.sock = None
@@ -26,21 +34,21 @@ class FTX1MeterMonitor:
 
         self.status_var = tk.StringVar(value=f"Connecting to {host}:{port}...")
 
-        # Standard Hamlib level tokens (requires Hamlib with PR #2010 FTX-1 fixes)
+        # Standard Hamlib level tokens
         self.left_meters = {
             "STRENGTH": {
                 "hamlib_cmd": "l STRENGTH",
-                "scale": lambda r: r,  # dB (negative typical); add converter for S-units if desired
+                "scale": lambda r: r,
                 "tx_only": False,
                 "fmt": "{:.0f} dB",
-                "max": 20  # for bar graph (focus on positive/strong signals)
+                "max": 20
             },
             "PO": {
                 "hamlib_cmd": "l RFPOWER_METER_WATTS",
                 "scale": lambda r: r / 10,
                 "tx_only": True,
                 "fmt": "{:.1f} W",
-                "max": 10  # Field version scale
+                "max": 10
             },
             "SWR": {
                 "hamlib_cmd": "l SWR",
@@ -51,56 +59,56 @@ class FTX1MeterMonitor:
             },
             "ALC": {
                 "hamlib_cmd": "l ALC",
-                "scale": lambda r: r * 10,  # 0-1 → 0-10 scale (common on Yaesu)
+                "scale": lambda r: r * 10,
                 "tx_only": True,
                 "fmt": "{:.1f}",
                 "max": 10.0
             },
             "COMP": {
                 "hamlib_cmd": "l COMP",
-                "scale": lambda r: r * 100,  # if 0-1 → percent (AMC on FTX-1)
+                "scale": lambda r: r * 100,
                 "tx_only": True,
                 "fmt": "{:.0f}%",
                 "max": 100
             },
             "VDD": {
-                "hamlib_cmd": "l VD_METER",  # or try "l VDD" if alias
+                "hamlib_cmd": "l VD_METER",
                 "scale": lambda r: r / 1.04,
                 "tx_only": False,
                 "fmt": "{:.1f} V",
-                "max": 15.0  # battery/external supply
+                "max": 15.0
             },
             "ID": {
                 "hamlib_cmd": "l ID_METER",
                 "scale": lambda r: r / 10,
                 "tx_only": True,
                 "fmt": "{:.1f} A",
-                "max": 4.0  # low current on Field (higher with Optima amp)
+                "max": 4.0
             },
         }
-        # Mode-aware bandwidth options (Hz strings) from Yaesu CAT Table 3 / Operating Manual ranges
+
         self.bw_options_by_mode = {
             "LSB": ["300", "400", "600", "850", "1100", "1200", "1500", "1650", "1800", "1950",
                     "2100", "2250", "2400", "2450", "2500", "2600", "2700", "2800", "2900",
                     "3000", "3200", "3500", "4000"],
             "USB": ["300", "400", "600", "850", "1100", "1200", "1500", "1650", "1800", "1950",
                     "2100", "2250", "2400", "2450", "2500", "2600", "2700", "2800", "2900",
-                    "3000", "3200", "3500", "4000"],  # same as LSB
+                    "3000", "3200", "3500", "4000"],
             "CW-U": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
                      "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
                      "3500", "4000"],
             "CW-L": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
                      "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
-                     "3500", "4000"],  # same as CW-U
+                     "3500", "4000"],
             "RTTY": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
                      "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
                      "3500", "4000"],
             "RTTYR": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
                       "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
-                      "3500", "4000"],  # RTTY reverse, same
+                      "3500", "4000"],
             "PKTUSB": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
                        "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
-                       "3500", "4000"],  # DATA/PSK similar to CW
+                       "3500", "4000"],
             "PKTLSB": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
                        "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
                        "3500", "4000"],
@@ -110,11 +118,9 @@ class FTX1MeterMonitor:
             "DATA-L": ["50", "100", "150", "200", "250", "300", "350", "400", "450", "500",
                        "600", "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
                        "3500", "4000"],
-            "AM": ["9000"],  # fixed
-            "FM": ["16000"],  # fixed wide
-            # Fallback for any unrecognized mode
+            "AM": ["9000"],
+            "FM": ["16000"],
         }
-        # Default fallback list if mode not matched
         self.default_bw_options = ["50", "100", "150", "200", "250", "300", "400", "500", "600",
                                    "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
                                    "3500", "4000"]
@@ -126,7 +132,6 @@ class FTX1MeterMonitor:
         self.smoothing_alpha = 0.2
         self.bar_height = 6
 
-        # Your original control variables (unchanged)
         self.power_var = tk.DoubleVar()
         self.preamp_var = tk.StringVar()
         self.att_var = tk.StringVar()
@@ -137,28 +142,31 @@ class FTX1MeterMonitor:
         self.mode_var = tk.StringVar()
         self.filter_var = tk.StringVar(value="—")
 
+        self.initial_bw_synced = False
+        self.current_bw_str = "—"
+
         self.last_set = {}
         self.ignore_readback_until = 0.0
 
         self.startup_sync_done = False
         self.startup_retries = 0
         self.max_startup_retries = 5
+        self.default_startup_bw = "0"
 
         self.sync_in_progress = False
-        self.last_user_change_time = time.time()  # init to now to skip early periodic
+        self.last_user_change_time = time.time()
         self.last_control_sync_time = 0.0
-        self.control_sync_interval = 10.0  # seconds
-        self.user_debounce_sec = 8.0  # ignore periodic after app change
+        self.control_sync_interval = 10.0
+        self.user_debounce_sec = 8.0
 
         self.build_gui()
         self.connect_to_rig()
-        print("Connect done — waiting 2s before first sync")
+        self.logger.info("Connect done — waiting 2s before first sync")
         self.root.after(2000, self._startup_control_sync)
 
-        self.root.after(1000, self._perform_control_sync)  # startup only
+        self.root.after(1000, self._perform_control_sync)
 
     def build_gui(self):
-        # Radio Status (top)
         sf = ttk.LabelFrame(self.root, text="Radio Status")
         sf.pack(fill="x", padx=10, pady=5)
         self.freq_var = tk.StringVar(value="—")
@@ -169,8 +177,8 @@ class FTX1MeterMonitor:
         mode_frame = ttk.Frame(sf)
         mode_frame.grid(row=1, column=1, sticky="w")
         mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var,
-                                  values=["PKTUSB", "PKTLSB", "USB", "LSB", "CW-U", "CW-L", "AM", "FM",
-                                          "RTTY", "DATA-U", "DATA-L"], state="readonly", width=12)
+                                  values=["DATA-U", "DATA-L", "USB", "LSB", "CW-U", "CW-L", "AM", "FM",
+                                          "RTTY", "RTTYR"], state="readonly", width=12)
         mode_combo.pack(side="left")
         mode_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
@@ -183,18 +191,15 @@ class FTX1MeterMonitor:
 
         ttk.Label(mode_frame, text="Hz").pack(side="left", padx=(2, 10))
 
-        # Meters & Controls section – side-by-side layout
         msf = ttk.LabelFrame(self.root, text="Meters & Controls")
         msf.pack(fill="both", expand=True, padx=10, pady=6)
 
-        msf.columnconfigure(0, weight=3)  # left meters take more space
-        msf.columnconfigure(1, weight=0)  # thin vertical separator
-        msf.columnconfigure(2, weight=1)  # right controls
+        msf.columnconfigure(0, weight=3)
+        msf.columnconfigure(1, weight=0)
+        msf.columnconfigure(2, weight=1)
 
-        # Thin vertical separator
         ttk.Separator(msf, orient='vertical').grid(row=0, column=1, sticky='ns', padx=4, pady=4)
 
-        # Left side: meters
         left_meter_frame = ttk.Frame(msf)
         left_meter_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 4), pady=6)
 
@@ -219,133 +224,128 @@ class FTX1MeterMonitor:
 
         for m in self.left_meters:
             label_text = pretty_left.get(m, m)
-
             left_meter_frame.rowconfigure(row, weight=0, minsize=LABEL_MINSIZE)
-
             ttk.Label(left_meter_frame, text=f"{label_text}:").grid(
                 row=row, column=0, sticky="e", padx=(10, 4), pady=(ROW_PADY, 1)
             )
-
             var = tk.StringVar(value="—")
             self.meter_labels[m] = var
-            ttk.Label(
-                left_meter_frame,
-                textvariable=var,
-                font=("Arial", 11, "bold"),
-                width=12,
-                anchor="w"
-            ).grid(row=row, column=1, sticky="w", padx=6, pady=(ROW_PADY, 1))
-
+            ttk.Label(left_meter_frame, textvariable=var, font=("Arial", 11, "bold"),
+                      width=12, anchor="w").grid(row=row, column=1, sticky="w", padx=6, pady=(ROW_PADY, 1))
             left_meter_frame.rowconfigure(row + 1, weight=0, minsize=BAR_MINSIZE)
-
-            canvas = tk.Canvas(
-                left_meter_frame,
-                width=BAR_WIDTH,
-                height=self.bar_height,
-                bg="#222",
-                highlightthickness=0
-            )
-            canvas.grid(
-                row=row + 1,
-                column=1,
-                sticky="w",
-                padx=6,
-                pady=(1, ROW_PADY + 2)
-            )
+            canvas = tk.Canvas(left_meter_frame, width=BAR_WIDTH, height=self.bar_height,
+                               bg="#222", highlightthickness=0)
+            canvas.grid(row=row + 1, column=1, sticky="w", padx=6, pady=(1, ROW_PADY + 2))
             self.bar_canvases[m] = canvas
             self.smoothed_values[m] = 0.0
-
             row += 2
 
-        # Right side: controls
         right_controls_frame = ttk.Frame(msf)
         right_controls_frame.grid(row=0, column=2, sticky="n", padx=(20, 10), pady=8)
 
         right_row = 0
         RIGHT_PADY = 8
 
-        ttk.Label(right_controls_frame, text="Power (W):").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
-                                                                pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="Power (W):").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
         self.power_spin = tk.Spinbox(right_controls_frame, from_=0.5, to=10.0, increment=0.1,
-                                     textvariable=self.power_var, width=6,
-                                     command=self.apply_controls)
+                                     textvariable=self.power_var, width=6, command=self.apply_controls)
         self.power_spin.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="Preamp:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
-                                                             pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="Preamp:").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
         self.preamp_combo = ttk.Combobox(right_controls_frame, textvariable=self.preamp_var,
-                                         values=["IPO", "AMP1", "AMP2"],
-                                         state="readonly", width=8)
+                                         values=["IPO", "AMP1", "AMP2"], state="readonly", width=8)
         self.preamp_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.preamp_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="ATT:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
-                                                          pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="ATT:").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
         self.att_combo = ttk.Combobox(right_controls_frame, textvariable=self.att_var,
-                                      values=["Off", "-6 dB", "-12 dB", "-18 dB"],
-                                      state="readonly", width=8)
+                                      values=["Off", "-6 dB", "-12 dB", "-18 dB"], state="readonly", width=8)
         self.att_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.att_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="Squelch:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
-                                                              pady=RIGHT_PADY)
-        self.sql_spin = tk.Spinbox(right_controls_frame, from_=0.0, to=1.0, increment=0.05, textvariable=self.sql_var,
-                                   width=6,
-                                   command=self.apply_controls)
+        ttk.Label(right_controls_frame, text="Squelch:").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
+        self.sql_spin = tk.Spinbox(right_controls_frame, from_=0.0, to=1.0, increment=0.05,
+                                   textvariable=self.sql_var, width=6, command=self.apply_controls)
         self.sql_spin.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="AGC:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
-                                                          pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="AGC:").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
         self.agc_combo = ttk.Combobox(right_controls_frame, textvariable=self.agc_var,
-                                      values=["Off", "Fast", "Medium", "Slow", "Auto"],
-                                      state="readonly", width=10)
+                                      values=["Off", "Fast", "Medium", "Slow", "Auto"], state="readonly", width=10)
         self.agc_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.agc_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="Noise Red. (NR):").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
-                                                                      pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="Noise Red. (NR):").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
         self.nr_combo = ttk.Combobox(right_controls_frame, textvariable=self.nr_var,
-                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly",
-                                     width=8)
+                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly", width=8)
         self.nr_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.nr_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="Noise Bl. (NB):").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
-                                                                     pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="Noise Bl. (NB):").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
         self.nb_combo = ttk.Combobox(right_controls_frame, textvariable=self.nb_var,
-                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly",
-                                     width=8)
+                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly", width=8)
         self.nb_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.nb_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
-        # Bottom status bar: connection status + Reconnect button
         bottom_frame = ttk.Frame(self.root)
         bottom_frame.pack(fill="x", pady=8, padx=10)
 
-        # Status label on left
         ttk.Label(bottom_frame, textvariable=self.status_var, font=("Arial", 9)).pack(side="left")
-
-        # Reconnect button on right
         reconnect_btn = ttk.Button(bottom_frame, text="Reconnect", command=self.reconnect)
         reconnect_btn.pack(side="right")
 
+    def _display_to_hamlib_mode(self, display_mode):
+        """Map UI-displayed mode name to what Hamlib/radio expects."""
+        map_display_to_hamlib = {
+            "DATA-U": "PKTUSB",
+            "DATA-L": "PKTLSB",
+            # Add others only if needed; most are 1:1
+        }
+        return map_display_to_hamlib.get(display_mode, display_mode)
+
+    def _hamlib_to_display_mode(self, hamlib_mode):
+        """Map what radio/Hamlib returns to UI-displayed name."""
+        map_hamlib_to_display = {
+            "PKTUSB": "DATA-U",
+            "PKTLSB": "DATA-L",
+            # Add others if radio returns unexpected aliases
+        }
+        return map_hamlib_to_display.get(hamlib_mode, hamlib_mode)
+
+    def send_raw_cat(self, cat_str):
+        if not cat_str.endswith(';'):
+            cat_str += ';'
+        cmd = cat_str.upper()
+        try:
+            self.logger.debug(f"Direct raw CAT send: {cmd}")
+            self.sock.sendall((cmd + "\n").encode('ascii'))
+            self.sock.settimeout(0.5)  # very short — expect no reply
+            try:
+                junk = self._read_line(timeout=0.5)  # drain any unexpected echo
+                self.logger.debug(f"Unexpected reply on set: {junk}")
+            except socket.timeout:
+                self.logger.debug("No reply on direct set (expected)")
+            self.sock.settimeout(5.0)
+            return "OK (direct send)"
+        except Exception as e:
+            self.logger.error(f"Direct raw CAT error: {e}")
+            self.sock = None
+            return f"Error: {e}"
+
     def update_bw_combo_options(self):
-        """Update bandwidth combo values based on current mode."""
         mode = self.mode_var.get().strip()
         if mode in ["—", ""]:
             self.bw_combo['values'] = self.default_bw_options
             return
 
-        # Map similar modes (e.g., PKTUSB → USB-like)
         key_mode = mode
         if "PKT" in mode:
-            key_mode = "PKTUSB"  # or map to USB/CW as needed
+            key_mode = "PKTUSB"
         elif "RTTY" in mode:
             key_mode = "RTTY"
 
@@ -384,6 +384,7 @@ class FTX1MeterMonitor:
         def try_set(var, resp, parser=float, setter=None, scale=None):
             nonlocal success
             if not resp or not resp.strip() or "RPRT" in resp or "Error" in resp:
+                self.logger.debug(f"Invalid response for try_set: {resp}")
                 return
             try:
                 raw = float(resp.strip())  # most levels are float
@@ -396,18 +397,19 @@ class FTX1MeterMonitor:
                 else:
                     var.set(val)
                 success += 1
-            except (ValueError, TypeError):
-                pass  # silent fail on bad parse
+                self.logger.debug(f"Successfully set value: {val}")
+            except (ValueError, TypeError) as e:
+                self.logger.debug(f"Parse/set failed: {e} (raw={resp})")
 
         # RFPOWER: 0.0-1.0 → watts (clamp 0.5-10)
         resp = self.rig_cmd("l RFPOWER")
-        print(f"l RFPOWER → {resp}")
+        self.logger.debug(f"l RFPOWER → {resp}")
         try_set(self.power_var, resp, parser=float,
                 scale=lambda r: max(0.5, min(10.0, round(r * 10, 1))))
 
         # PREAMP: 0=IPO, 1=AMP1, 2=AMP2
         resp = self.rig_cmd("l PREAMP")
-        print(f"l PREAMP → {resp}")
+        self.logger.debug(f"l PREAMP → {resp}")
 
         def set_preamp(v):
             map_ = {0: "IPO", 1: "AMP1", 2: "AMP2"}
@@ -417,7 +419,7 @@ class FTX1MeterMonitor:
 
         # ATT: 0=Off, 6=-6, 12=-12, 18=-18
         resp = self.rig_cmd("l ATT")
-        print(f"l ATT → {resp}")
+        self.logger.debug(f"l ATT → {resp}")
 
         def set_att(v):
             map_ = {0: "Off", 6: "-6 dB", 12: "-12 dB", 18: "-18 dB"}
@@ -427,12 +429,12 @@ class FTX1MeterMonitor:
 
         # SQL: 0.0-1.0 float
         resp = self.rig_cmd("l SQL")
-        print(f"l SQL → {resp}")
+        self.logger.debug(f"l SQL → {resp}")
         try_set(self.sql_var, resp, parser=float)
 
         # AGC: 0=Off,1=Fast,2=Medium,3=Slow,4=Auto (confirm with your rig)
         resp = self.rig_cmd("l AGC")
-        print(f"l AGC → {resp}")
+        self.logger.debug(f"l AGC → {resp}")
 
         def set_agc(v):
             map_ = {0: "Off", 1: "Fast", 2: "Medium", 3: "Slow", 4: "Auto"}
@@ -442,21 +444,21 @@ class FTX1MeterMonitor:
 
         # NR (DNR): 0.0-1.0 → map to 0="Off", 1-10
         resp = self.rig_cmd("l NR")
-        print(f"l NR → {resp}")
+        self.logger.debug(f"l NR → {resp}")
 
         def set_nr(raw):
-            level = int(round(raw * 10))  # 0.0→0, 0.0667→1 (if ~1/15 but CAT is /10), up to 1.0→10
+            level = int(round(raw * 10))  # 0.0→0, 0.0667→1, up to 1.0→10
             nr_str = "Off" if level <= 0 else str(min(10, max(0, level)))
             self.nr_var.set(nr_str)
 
         try_set(None, resp, parser=float, setter=set_nr)
 
-        # NB: assume 0.0-1.0 normalized → scale to int 0-10 (adjust if your poll shows different)
+        # NB: assume 0.0-1.0 normalized → scale to int 0-10
         resp = self.rig_cmd("l NB")
-        print(f"l NB → {resp}")
+        self.logger.debug(f"l NB → {resp}")
 
         def set_nb(raw):
-            level = int(round(raw * 10))  # common mapping; if 0-100, change to round(raw)
+            level = int(round(raw * 10))  # common mapping
             nb_str = "Off" if level <= 0 else str(min(10, max(0, level)))
             self.nb_var.set(nb_str)
 
@@ -465,7 +467,7 @@ class FTX1MeterMonitor:
         self.sync_in_progress = False
         self.last_control_sync_time = now
 
-        print(f"Control sync: {success}/7 successful")
+        self.logger.info(f"Control sync: {success}/7 successful")
         return success
 
     def _startup_control_sync(self):
@@ -477,14 +479,62 @@ class FTX1MeterMonitor:
         if success >= 5:
             self.startup_sync_done = True
             self.status_var.set("Startup sync OK ✓")
-            self.root.after(200, self.update_readings)  # now start polling
+
+            # Initial bandwidth sync — give it more time + retry once
+            self.logger.info("Performing initial bandwidth sync via SH0;")
+            mode = self.mode_var.get().strip().upper() or "USB"
+            sh_resp = None
+            for attempt in range(2):  # retry once
+                sh_resp = self.rig_cmd("w SH0;", timeout=10.0)
+                if sh_resp and "SH" in sh_resp:
+                    break
+                self.logger.warning(f"Startup SH0 attempt {attempt + 1} timed out - retrying")
+                time.sleep(0.5)
+
+            if sh_resp and "SH" in sh_resp:
+                try:
+                    idx_part = sh_resp.rstrip(";").split("SH")[1].strip().lstrip("0")
+                    idx = int(idx_part) if idx_part else 0
+                    self.logger.debug(f"Startup SH0 response: {sh_resp} (index {idx})")
+
+                    key_mode = mode
+                    if "PKT" in key_mode or "DATA" in key_mode:
+                        key_mode = "PKTUSB"
+                    elif "RTTY" in key_mode:
+                        key_mode = "RTTY"
+                    elif "CW" in key_mode:
+                        key_mode = "CW-U"
+                    elif key_mode in ("USB", "LSB"):
+                        key_mode = "USB"
+
+                    options = self.bw_options_by_mode.get(key_mode, self.default_bw_options)
+
+                    if 1 <= idx <= len(options):
+                        real_bw = options[idx - 1]
+                        self.current_bw_str = real_bw
+                        self.bw_combo.set(real_bw)
+                        self.logger.info(f"Startup BW synced: {real_bw} Hz (index {idx})")
+                    else:
+                        self.logger.warning(f"Startup BW index out of range: {idx} - using default")
+                        self.current_bw_str = self.default_startup_bw
+                        self.bw_combo.set(self.default_startup_bw)
+                except Exception as ex:
+                    self.logger.error(f"Startup SH0 parse failed: {ex}")
+                    self.current_bw_str = self.default_startup_bw
+                    self.bw_combo.set(self.default_startup_bw)
+            else:
+                self.logger.warning("Startup SH0 failed after retry - using default")
+                self.current_bw_str = self.default_startup_bw
+                self.bw_combo.set(self.default_startup_bw)
+
+            self.root.after(200, self.update_readings)
         else:
             self.startup_retries += 1
             if self.startup_retries < self.max_startup_retries:
                 self.root.after(4000, self._startup_control_sync)
             else:
                 self.startup_sync_done = True
-                self.root.after(200, self.update_readings)  # continue anyway
+                self.root.after(200, self.update_readings)
 
     def apply_controls(self):
         if not self.sock:
@@ -534,33 +584,68 @@ class FTX1MeterMonitor:
 
         mode_str = self.mode_var.get().strip()
         if mode_str and mode_str != "—":
-            self.rig_cmd(f"M {mode_str} 0")  # Include 0 to request default BW for the mode - avoids timeout
-            self.last_set["mode"] = mode_str
+            hamlib_mode = self._display_to_hamlib_mode(mode_str)
+            self.rig_cmd(f"M {hamlib_mode} 0")  # send PKTUSB/PKTLSB as needed
+            self.last_set["mode"] = hamlib_mode
+            self.logger.debug(f"Mode set: displayed '{mode_str}' → sent '{hamlib_mode}'")
 
         self.status_var.set("Changes applied")
 
     def set_bandwidth(self, event=None):
-        """User selected a bandwidth from the combo."""
         bw_str = self.bw_combo.get().strip()
         if not bw_str or bw_str == "—":
             return
 
+        mode = self.mode_var.get().strip().upper()
+        if not mode or mode == "—":
+            self.status_var.set("Select mode first")
+            return
+
         try:
             bw = int(bw_str)
-            mode = self.mode_var.get().strip()
-            if not mode or mode == "—":
-                raise ValueError("No mode selected")
 
-            self.rig_cmd(f"M {mode} {bw}")
-            self.last_user_change_time = time.time()  # prevent poll fight
-            self.status_var.set(f"Bandwidth set to {bw} Hz")
+            key_mode = mode
+            if "PKT" in mode or "DATA" in mode:
+                key_mode = "PKTUSB"
+            elif "RTTY" in mode:
+                key_mode = "RTTY"
+            elif "CW" in mode:
+                key_mode = "CW-U"
+            elif mode in ("USB", "LSB"):
+                key_mode = "USB"
 
-            # Quick re-poll to confirm rig accepted (e.g., snapped value)
-            self.root.after(400, self.update_readings)
+            options = self.bw_options_by_mode.get(key_mode, self.default_bw_options)
 
-        except ValueError as e:
-            self.status_var.set(f"Invalid: {e}")
-            # Poll will revert display soon
+            if bw_str not in options:
+                self.status_var.set(f"{bw} Hz invalid for {mode}")
+                self.logger.warning(f"Invalid BW for mode {mode}: {bw}")
+                return
+
+            idx = options.index(bw_str) + 1
+            p3 = f"{idx:02d}"
+            raw_cmd = f"SH00{p3}"
+
+            resp = self.send_raw_cat(raw_cmd)
+            self.logger.debug(f"Set BW: {raw_cmd} → {resp or 'sent (no reply)'}")
+
+            if resp is None or "Error" in str(resp):
+                self.status_var.set(f"Failed to set {bw} Hz ({raw_cmd})")
+                self.logger.warning(f"BW set may have failed: {resp}")
+            else:
+                self.current_bw_str = bw_str
+                self.bw_combo.set(bw_str)
+                self.last_bw_change_time = time.time()
+                self.status_var.set(f"Bandwidth set to {bw} Hz ({raw_cmd})")
+                self.logger.info(f"BW updated in UI: {bw_str} Hz")
+
+            self.last_user_change_time = time.time()
+            self.ignore_readback_until = time.time() + 8.0
+
+            self.root.after(600, self.update_readings)
+
+        except Exception as e:
+            self.status_var.set(f"Error setting BW: {e}")
+            self.logger.error(f"set_bandwidth exception: {e}")
 
     def format_smeter(self, raw_str):
         try:
@@ -651,26 +736,62 @@ class FTX1MeterMonitor:
 
     def connect_to_rig(self):
         try:
-            if self.sock: self.sock.close()
+            if self.sock:
+                self.sock.close()
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.settimeout(5.0)
             self.sock.connect((self.host, self.port))
             self.status_var.set("Connected ✓")
+            self.logger.info("Connected to rigctld")
             return True
         except Exception as e:
             self.status_var.set(f"Connect error: {e}")
+            self.logger.error(f"Connect failed: {e}")
             self.sock = None
             return False
 
-    def _read_line(self):
-        """Read exactly one \\n-terminated line from the socket, byte by byte."""
-        buf = ""
-        while True:
-            chunk = self.sock.recv(1).decode('ascii', errors='ignore')
-            if not chunk or chunk == "\n":
-                break
-            buf += chunk
-        return buf.strip()
+    def _read_line(self, timeout=3.0):
+        """Read until ; or \n — Yaesu CAT uses ; as real terminator."""
+        self.sock.settimeout(timeout)
+        buf = bytearray()
+        start_time = time.time()
+        try:
+            while time.time() - start_time < timeout:
+                try:
+                    chunk = self.sock.recv(4096)
+                    if not chunk:
+                        raise socket.timeout("Connection closed by remote")
+                    buf.extend(chunk)
+
+                    # Check for Yaesu-style terminator: ;
+                    if b';' in buf:
+                        # Split at first ;
+                        parts = buf.split(b';', 1)
+                        line_bytes = parts[0]
+                        rest = parts[1] if len(parts) > 1 else b''
+                        decoded = line_bytes.decode('ascii', errors='ignore').strip()
+                        self.logger.debug(f"Read Yaesu response (ended by ;): {decoded};")
+                        # Optionally put rest back or drain later
+                        return decoded + ";"  # include ; so caller sees full response
+
+                    # Fallback to \n if no ; found
+                    if b'\n' in buf:
+                        line_bytes, rest = buf.split(b'\n', 1)
+                        decoded = line_bytes.decode('ascii', errors='ignore').strip()
+                        self.logger.debug(f"Read line (ended by \\n): {decoded}")
+                        return decoded
+
+                except BlockingIOError:
+                    time.sleep(0.01)
+
+            raise socket.timeout("Read timeout - no ; or \\n received")
+
+        except socket.timeout:
+            self.logger.debug("Read timeout in _read_line")
+            raise
+        except Exception as e:
+            self.logger.error(f"Read error: {e}")
+            raise
 
     def _drain_socket(self):
         """Non-blocking drain of any stale data in the socket buffer."""
@@ -687,72 +808,101 @@ class FTX1MeterMonitor:
         finally:
             self.sock.setblocking(True)
             self.sock.settimeout(5.0)
-        if drained:
-            print(f"  drained stale: {drained!r}")
         return drained
 
-    def rig_cmd(self, cmd):
-        """Send a command using simple protocol. Read one line response.
-        Validates that the response looks reasonable before returning."""
-        if not self.sock: return None
+    def rig_cmd(self, cmd, timeout=4.0):
+        if not self.sock:
+            return None
         try:
+            self.logger.debug(f"Sending: {cmd}")
             self.sock.sendall((cmd + "\n").encode('ascii'))
-            resp = self._read_line()
+            resp = self._read_line(timeout=timeout)
+            self.logger.debug(f"Received: {resp}")
             if not resp:
                 return None
             if "RPRT" in resp:
                 try:
                     code = int(resp.split("RPRT")[1].strip())
                     if code != 0:
-                        print(f"rig_cmd('{cmd}') error: RPRT {code}")
-                except ValueError:
+                        self.logger.warning(f"RPRT error {code} for {cmd}")
+                        return None
+                except:
                     pass
-                return None
             return resp
+        except socket.timeout:
+            self.logger.debug(f"Timeout on {cmd}")
+            return None  # don't kill socket on timeout
         except Exception as e:
-            print(f"Command failed: {cmd} → {e}")
+            self.logger.error(f"rig_cmd failed '{cmd}': {e}")
             self.sock = None
             self.status_var.set("Connection dropped - reconnecting...")
             return None
 
-    def rig_cmd_lines(self, cmd, num_lines=2):
-        """Send a command that returns multiple response lines (simple protocol).
-        Drains socket first to ensure clean state, then reads expected lines.
-
-        Handles both newline-separated responses (default rigctld)
-        and custom-separator responses (rigctld -S <char>).
-        """
-        if not self.sock: return None
+    def rig_cmd_lines(self, cmd, num_lines=2, timeout_per_line=2.0):
+        if not self.sock:
+            return None
         try:
-            # Drain stale data to resync before multi-line read
-            self._drain_socket()
+            self._drain_socket()  # clean start
 
+            self.logger.debug(f"Sending multi-line: {cmd}")
             self.sock.sendall((cmd + "\n").encode('ascii'))
+
+            self.sock.settimeout(timeout_per_line * num_lines + 1.0)
             lines = []
+            buf = bytearray()
             attempts = 0
-            while len(lines) < num_lines and attempts < num_lines + 4:
+            max_attempts = num_lines * 3
+
+            while len(lines) < num_lines and attempts < max_attempts:
                 attempts += 1
-                line = self._read_line()
-                if not line:
-                    continue
-                if "RPRT" in line:
-                    try:
-                        code = int(line.split("RPRT")[1].strip())
-                        if code != 0:
-                            print(f"rig_cmd_lines('{cmd}') error: RPRT {code}")
-                    except ValueError:
-                        pass
+                try:
+                    chunk = self.sock.recv(4096)
+                    if not chunk:
+                        raise socket.timeout("Connection closed during multi-line read")
+                    buf.extend(chunk)
+
+                    # Split on \n as much as possible
+                    while b'\n' in buf:
+                        line_bytes, buf = buf.split(b'\n', 1)
+                        line = line_bytes.decode('ascii', errors='ignore').strip()
+                        if line:
+                            if "RPRT" in line:
+                                code = int(line.split("RPRT")[1].strip()) if "RPRT" in line else -1
+                                if code != 0:
+                                    self.logger.debug(f"Multi-line RPRT error {code} for {cmd}")
+                                    return None
+                            lines.append(line)
+                            self.logger.debug(f"Multi-line read: {line}")
+                except socket.timeout:
+                    self.logger.debug(f"Timeout waiting for line {len(lines) + 1}/{num_lines} of {cmd}")
                     break
-                lines.append(line)
-            # Handle custom separator on a single line
-            if len(lines) == 1 and len(lines[0]) > 0:
+
+            # If we have partial buf left, try one more short read
+            if buf and len(lines) < num_lines:
+                try:
+                    self.sock.settimeout(0.5)
+                    extra = self.sock.recv(512)
+                    if extra:
+                        buf.extend(extra)
+                except:
+                    pass
+
+            # Handle single-line custom separator fallback
+            if len(lines) == 1 and lines[0]:
                 for sep in ['$', '@', '|', ';']:
                     if sep in lines[0]:
-                        lines = [part.strip() for part in lines[0].split(sep)]
+                        lines = [p.strip() for p in lines[0].split(sep) if p.strip()]
                         break
-            return lines if lines else None
+
+            if len(lines) >= num_lines:
+                self.logger.debug(f"Multi-line success: {lines[:num_lines]}")
+                return lines[:num_lines]
+            else:
+                print(f"Multi-line incomplete: got {len(lines)} of {num_lines}")
+                return None
+
         except Exception as e:
-            print(f"Command failed: {cmd} → {e}")
+            print(f"rig_cmd_lines failed '{cmd}': {e}")
             self.sock = None
             self.status_var.set("Connection dropped - reconnecting...")
             return None
@@ -824,16 +974,13 @@ class FTX1MeterMonitor:
                 self._perform_control_sync()
 
         if not self.sock:
-            self.status_var.set("Disconnected — retrying...")
-            self.root.after(3000, self.reconnect)
-            self.root.after(1000, self.update_readings)
-            return
+            self.status_var.set("Disconnected — reconnecting...")
+            if not self.reconnect():
+                self.root.after(3000, self.update_readings)
+                return
 
         try:
-            # Drain any stale data at the start of each poll cycle
             self._drain_socket()
-
-            # Frequency
             f = self.rig_cmd("f")
             if f and f.replace(".", "").replace("-", "").isdigit():
                 try:
@@ -841,62 +988,52 @@ class FTX1MeterMonitor:
                     self.freq_var.set(f"{freq_mhz:.6f} MHz")
                 except ValueError:
                     self.freq_var.set("—")
+            else:
+                self.freq_var.set("—")
 
-            # Mode + Filter
+            # Mode (trust m for mode only)
             mode_lines = self.rig_cmd_lines("m", num_lines=2)
-            if mode_lines and len(mode_lines) >= 2:
-                mode = mode_lines[0].strip() or "—"
-                bw_str = mode_lines[1].strip()
-                self.mode_var.set(mode)
-
-                # Update options first (mode changed?)
+            if mode_lines and len(mode_lines) >= 1:
+                hamlib_mode = mode_lines[0].strip() or "—"
+                display_mode = self._hamlib_to_display_mode(hamlib_mode)
+                self.mode_var.set(display_mode)
+                self.logger.debug(f"Mode polled: received '{hamlib_mode}' → displayed '{display_mode}'")
                 self.update_bw_combo_options()
+            else:
+                self.mode_var.set("—")
+                self.bw_combo.set(self.current_bw_str or "—")
 
-                try:
-                    bw_int = int(bw_str)
-                    bw_display = str(bw_int)
-                    # Set combo to exact value if in list, else show it anyway
-                    self.bw_combo.set(bw_display)
-                except ValueError:
-                    self.bw_combo.set("—")
-
-            # Meters
+            # Meters (unchanged)
             for name, cfg in self.left_meters.items():
                 raw_str = self.get_hamlib_level(cfg["hamlib_cmd"])
-
                 if raw_str is None:
                     self.update_meter_gui(name, 0.0)
                     continue
-
                 try:
                     raw = float(raw_str)
-                except (ValueError, TypeError):
-                    print(f"Meter {name} conversion failed: {raw_str!r}")
+                    value = cfg["scale"](raw)
+                    if cfg.get("tx_only", False) and value <= 0.0:
+                        value = 0.0
+                    self.update_meter_gui(name, value)
+                except:
                     self.update_meter_gui(name, 0.0)
-                    continue
-
-                value = cfg["scale"](raw)
-
-                # Skip display if tx-only meter and value is zero (likely not transmitting)
-                if cfg.get("tx_only", False) and value <= 0.0:
-                    self.update_meter_gui(name, 0.0)
-                    continue
-
-                # Display the scaled value directly (no smoothing)
-                self.update_meter_gui(name, value)
 
         except Exception as e:
-            print(f"Poll cycle error: {e}")
+            print(f"Poll error: {e}")
+            self.sock = None
 
-        # Status line
         self.status_var.set("Connected ✓")
-
-        # Schedule next update
         self.root.after(1000, self.update_readings)
 
     def reconnect(self):
-        self.connect_to_rig()
         self.status_var.set("Reconnecting...")
+        if self.sock:
+            try:
+                self.sock.close()
+            except:
+                pass
+        self.sock = None
+        return self.connect_to_rig()
 
     def quit_app(self):
         if hasattr(self, 'sock') and self.sock:
@@ -908,7 +1045,11 @@ class FTX1MeterMonitor:
 
 
 if __name__ == "__main__":
-    host = sys.argv[1] if len(sys.argv) > 1 else "localhost"
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 4532
-    app = FTX1MeterMonitor(host, port)
+    parser = argparse.ArgumentParser(description="FTX-1 Meter Monitor")
+    parser.add_argument("--host", default="localhost", help="rigctld host")
+    parser.add_argument("--port", type=int, default=4532, help="rigctld port")
+    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
+
+    app = FTX1MeterMonitor(host=args.host, port=args.port, debug=args.debug)
     app.root.mainloop()
