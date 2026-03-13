@@ -320,20 +320,20 @@ class FTX1MeterMonitor:
     def send_raw_cat(self, cat_str):
         if not cat_str.endswith(';'):
             cat_str += ';'
-        cmd = cat_str.upper()
+        cmd = f"w {cat_str.upper()}"
         try:
-            self.logger.debug(f"Direct raw CAT send: {cmd}")
+            self.logger.debug(f"Raw send (with w): {cmd}")
             self.sock.sendall((cmd + "\n").encode('ascii'))
-            self.sock.settimeout(0.5)  # very short — expect no reply
+            self.sock.settimeout(2.5)
             try:
-                junk = self._read_line(timeout=0.5)  # drain any unexpected echo
-                self.logger.debug(f"Unexpected reply on set: {junk}")
+                resp = self._read_line(timeout=1)
+                self.logger.debug(f"Read on set (usually empty): {resp}")
             except socket.timeout:
-                self.logger.debug("No reply on direct set (expected)")
-            self.sock.settimeout(5.0)
-            return "OK (direct send)"
+                self.logger.debug("Timeout on set (expected - no reply from radio)")
+            self.sock.settimeout(1.0)
+            return "OK (set sent, timeout normal)"
         except Exception as e:
-            self.logger.error(f"Direct raw CAT error: {e}")
+            self.logger.error(f"Raw CAT error: {e}")
             self.sock = None
             return f"Error: {e}"
 
