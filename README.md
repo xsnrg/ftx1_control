@@ -43,11 +43,11 @@ rigctld -m 1051 -r /dev/ttyUSB0 -s 38400 -t 4532 &
 ```bash
 python3 ftx1_meter.py
 ```
+add -d to the command-line for DEBUG output
 
 ### Known Limitations
 
-PRESET command (X) times out — not currently functional
-Some levels may have scaling quirks due to early Hamlib support for FTX-1
+PRESET, the selector that goes with the mode, does not exist in CAT
 
 ### Future Enhancements (planned / ideas)
 
@@ -56,7 +56,5 @@ Graphical gauges (circular S-meter, vertical PO/SWR)
 Config file (host/port, window position, defaults)
 Tooltips & help labels for controls
 
-
 ### Contributing
 Bug reports, feature requests, pull requests welcome!
-Especially welcome: Hamlib backend improvements for FTX-1 write support (PREAMP, ATT, RFPOWER set).
