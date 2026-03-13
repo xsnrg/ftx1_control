@@ -124,6 +124,7 @@ class FTX1MeterMonitor:
         self.default_bw_options = ["50", "100", "150", "200", "250", "300", "400", "500", "600",
                                    "800", "1200", "1400", "1700", "2000", "2400", "3000", "3200",
                                    "3500", "4000"]
+        self.power_options = [f"{x:.1f}" for x in [i * 0.5 for i in range(1, 21)]]  # 0.5, 1.0, ..., 10.0
 
         self.meter_labels = {}
         self.bar_canvases = {}
@@ -246,10 +247,13 @@ class FTX1MeterMonitor:
         right_row = 0
         RIGHT_PADY = 8
 
-        ttk.Label(right_controls_frame, text="Power (W):").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
-        self.power_spin = tk.Spinbox(right_controls_frame, from_=0.5, to=10.0, increment=0.1,
-                                     textvariable=self.power_var, width=6, command=self.apply_controls)
-        self.power_spin.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="Power (W):").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                                pady=RIGHT_PADY)
+        self.power_combo = ttk.Combobox(right_controls_frame, textvariable=self.power_var,
+                                        values=self.power_options, state="normal", width=6)
+        self.power_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
+        self.power_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
+        self.power_combo.bind("<Return>", lambda e: self.apply_controls())  # also apply on Enter
         right_row += 1
 
         ttk.Label(right_controls_frame, text="Preamp:").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
@@ -404,8 +408,16 @@ class FTX1MeterMonitor:
         # RFPOWER: 0.0-1.0 → watts (clamp 0.5-10)
         resp = self.rig_cmd("l RFPOWER")
         self.logger.debug(f"l RFPOWER → {resp}")
-        try_set(self.power_var, resp, parser=float,
-                scale=lambda r: max(0.5, min(10.0, round(r * 10, 1))))
+        if resp:
+            try:
+                raw = float(resp.strip())
+                watts = max(0.5, min(10.0, raw * 10))  # no rounding
+                self.power_var.set(f"{watts:.1f}")
+                self.logger.debug(f"Power readback: raw {raw:.2f} → displayed {watts:.1f}")
+            except:
+                self.power_var.set("0.5")
+        else:
+            self.power_var.set("0.5")
 
         # PREAMP: 0=IPO, 1=AMP1, 2=AMP2
         resp = self.rig_cmd("l PREAMP")
@@ -544,11 +556,23 @@ class FTX1MeterMonitor:
         self.last_user_change_time = time.time()
         self.ignore_readback_until = time.time() + 12.0
 
-        power_w = self.power_var.get()
-        power_raw = power_w / 10.0
-        self.rig_cmd(f"L RFPOWER {power_raw:.2f}")
-        self.last_set["power"] = power_raw
+        # Power handling (safe ignore on invalid)
+        power_w = self.power_var.get()  # already a float from DoubleVar
+        power_valid = True
 
+        # Validate range (no need for try/except on float conversion)
+        if not (0.5 <= power_w <= 10.0):
+            self.status_var.set(f"Power out of range ({power_w:.1f} W) — keeping previous")
+            self.logger.warning(f"Power out of range: {power_w:.1f} W - ignoring")
+            power_valid = False
+
+        if power_valid:
+            power_raw = power_w / 10.0
+            self.rig_cmd(f"L RFPOWER {power_raw:.2f}")
+            self.last_set["power"] = power_raw
+            self.status_var.set(f"Power set to {power_w:.1f} W")
+
+        # Other controls (always apply)
         sql_val = self.sql_var.get()
         self.rig_cmd(f"L SQL {sql_val:.2f}")
         self.last_set["sql"] = sql_val
@@ -558,38 +582,41 @@ class FTX1MeterMonitor:
         self.rig_cmd(f"L AGC {agc_val}")
         self.last_set["agc"] = agc_val
 
-        # --- Fixed NR handling ---
-        nr_display = self.nr_var.get()  # Assume this is a StringVar like "Off", "1", "2", ..., "10"
+        # NR
+        nr_display = self.nr_var.get()
         if nr_display == "Off":
             nr_int = 0
         else:
             try:
-                nr_int = int(nr_display)  # User sees/selects clean integers 1–10
+                nr_int = int(nr_display)
                 if not 1 <= nr_int <= 10:
-                    nr_int = 0  # Clamp invalid to off
+                    nr_int = 0
             except ValueError:
-                nr_int = 0  # Fallback
+                nr_int = 0
 
-        # Hamlib expects 0.0 (off) to 1.0 (max=level 10)
-        # So map: 0→0.0, 1→0.1, ..., 10→1.0
         nr_normalized = nr_int / 10.0
+        self.rig_cmd(f"L NR {nr_normalized:.4f}")
+        self.last_set["nr"] = nr_normalized
 
-        self.rig_cmd(f"L NR {nr_normalized:.4f}")  # Consistent precision
-        self.last_set["nr"] = nr_normalized  # Or store nr_int if you prefer
-
+        # NB
         nb_display = self.nb_var.get()
         nb_val = 0 if nb_display == "Off" else int(nb_display)
         self.rig_cmd(f"L NB {nb_val}")
         self.last_set["nb"] = nb_val
 
+        # Mode
         mode_str = self.mode_var.get().strip()
         if mode_str and mode_str != "—":
             hamlib_mode = self._display_to_hamlib_mode(mode_str)
-            self.rig_cmd(f"M {hamlib_mode} 0")  # send PKTUSB/PKTLSB as needed
+            self.rig_cmd(f"M {hamlib_mode} 0")
             self.last_set["mode"] = hamlib_mode
             self.logger.debug(f"Mode set: displayed '{mode_str}' → sent '{hamlib_mode}'")
 
-        self.status_var.set("Changes applied")
+        # Final status (after all changes)
+        if power_valid:
+            self.status_var.set("Changes applied")
+        else:
+            self.status_var.set("Changes applied (power unchanged)")
 
     def set_bandwidth(self, event=None):
         bw_str = self.bw_combo.get().strip()
