@@ -32,7 +32,7 @@ class FTX1MeterMonitor:
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
 
-        self.status_var = tk.StringVar(value=f"Connecting to {host}:{port}...")
+        self.status_var = tk.StringVar(value="Initializing...")
 
         # Standard Hamlib level tokens
         self.left_meters = {
@@ -128,6 +128,7 @@ class FTX1MeterMonitor:
 
         self.meter_labels = {}
         self.bar_canvases = {}
+        self.status_label = None
         self.smoothed_values = {k: 0.0 for k in self.left_meters}
 
         self.smoothing_alpha = 0.2
@@ -161,6 +162,7 @@ class FTX1MeterMonitor:
         self.user_debounce_sec = 8.0
 
         self.build_gui()
+        self.update_status_style(f"Connecting to {host}:{port}...", "gray")
         self.connect_to_rig()
         self.logger.info("Connect done — waiting 2s before first sync")
         self.root.after(2000, self._startup_control_sync)
@@ -168,8 +170,10 @@ class FTX1MeterMonitor:
         self.root.after(1000, self._perform_control_sync)
 
     def build_gui(self):
+        # Radio Status (top)
         sf = ttk.LabelFrame(self.root, text="Radio Status")
         sf.pack(fill="x", padx=10, pady=5)
+
         self.freq_var = tk.StringVar(value="—")
         ttk.Label(sf, text="Freq:").grid(row=0, column=0, sticky="e", padx=8, pady=3)
         ttk.Label(sf, textvariable=self.freq_var, font=("Arial", 12, "bold")).grid(row=0, column=1, sticky="w")
@@ -177,6 +181,7 @@ class FTX1MeterMonitor:
         ttk.Label(sf, text="Mode:").grid(row=1, column=0, sticky="e", padx=8, pady=3)
         mode_frame = ttk.Frame(sf)
         mode_frame.grid(row=1, column=1, sticky="w")
+
         mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var,
                                   values=["DATA-U", "DATA-L", "USB", "LSB", "CW-U", "CW-L", "AM", "FM",
                                           "RTTY", "RTTYR"], state="readonly", width=12)
@@ -192,6 +197,7 @@ class FTX1MeterMonitor:
 
         ttk.Label(mode_frame, text="Hz").pack(side="left", padx=(2, 10))
 
+        # Meters & Controls section – side-by-side layout
         msf = ttk.LabelFrame(self.root, text="Meters & Controls")
         msf.pack(fill="both", expand=True, padx=10, pady=6)
 
@@ -201,6 +207,7 @@ class FTX1MeterMonitor:
 
         ttk.Separator(msf, orient='vertical').grid(row=0, column=1, sticky='ns', padx=4, pady=4)
 
+        # Left side: meters
         left_meter_frame = ttk.Frame(msf)
         left_meter_frame.grid(row=0, column=0, sticky="nsew", padx=(10, 4), pady=6)
 
@@ -225,22 +232,45 @@ class FTX1MeterMonitor:
 
         for m in self.left_meters:
             label_text = pretty_left.get(m, m)
+
             left_meter_frame.rowconfigure(row, weight=0, minsize=LABEL_MINSIZE)
+
             ttk.Label(left_meter_frame, text=f"{label_text}:").grid(
                 row=row, column=0, sticky="e", padx=(10, 4), pady=(ROW_PADY, 1)
             )
+
             var = tk.StringVar(value="—")
             self.meter_labels[m] = var
-            ttk.Label(left_meter_frame, textvariable=var, font=("Arial", 11, "bold"),
-                      width=12, anchor="w").grid(row=row, column=1, sticky="w", padx=6, pady=(ROW_PADY, 1))
+            ttk.Label(
+                left_meter_frame,
+                textvariable=var,
+                font=("Arial", 11, "bold"),
+                width=12,
+                anchor="w"
+            ).grid(row=row, column=1, sticky="w", padx=6, pady=(ROW_PADY, 1))
+
             left_meter_frame.rowconfigure(row + 1, weight=0, minsize=BAR_MINSIZE)
-            canvas = tk.Canvas(left_meter_frame, width=BAR_WIDTH, height=self.bar_height,
-                               bg="#222", highlightthickness=0)
-            canvas.grid(row=row + 1, column=1, sticky="w", padx=6, pady=(1, ROW_PADY + 2))
+
+            canvas = tk.Canvas(
+                left_meter_frame,
+                width=BAR_WIDTH,
+                height=self.bar_height,
+                bg="#222",
+                highlightthickness=0
+            )
+            canvas.grid(
+                row=row + 1,
+                column=1,
+                sticky="w",
+                padx=6,
+                pady=(1, ROW_PADY + 2)
+            )
             self.bar_canvases[m] = canvas
             self.smoothed_values[m] = 0.0
+
             row += 2
 
+        # Right side: controls
         right_controls_frame = ttk.Frame(msf)
         right_controls_frame.grid(row=0, column=2, sticky="n", padx=(20, 10), pady=8)
 
@@ -250,58 +280,81 @@ class FTX1MeterMonitor:
         ttk.Label(right_controls_frame, text="Power (W):").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
                                                                 pady=RIGHT_PADY)
         self.power_combo = ttk.Combobox(right_controls_frame, textvariable=self.power_var,
-                                        values=self.power_options, state="normal", width=6)
+                                        values=self.power_options, state="readonly", width=6)
         self.power_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.power_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
-        self.power_combo.bind("<Return>", lambda e: self.apply_controls())  # also apply on Enter
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="Preamp:").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="Preamp:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                             pady=RIGHT_PADY)
         self.preamp_combo = ttk.Combobox(right_controls_frame, textvariable=self.preamp_var,
-                                         values=["IPO", "AMP1", "AMP2"], state="readonly", width=8)
+                                         values=["IPO", "AMP1", "AMP2"],
+                                         state="readonly", width=8)
         self.preamp_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.preamp_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="ATT:").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="ATT:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                          pady=RIGHT_PADY)
         self.att_combo = ttk.Combobox(right_controls_frame, textvariable=self.att_var,
-                                      values=["Off", "-6 dB", "-12 dB", "-18 dB"], state="readonly", width=8)
+                                      values=["Off", "-6 dB", "-12 dB", "-18 dB"],
+                                      state="readonly", width=8)
         self.att_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.att_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="Squelch:").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="Squelch:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                              pady=RIGHT_PADY)
         self.sql_spin = tk.Spinbox(right_controls_frame, from_=0.0, to=1.0, increment=0.05,
-                                   textvariable=self.sql_var, width=6, command=self.apply_controls)
+                                   textvariable=self.sql_var, width=6,
+                                   command=self.apply_controls)
         self.sql_spin.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="AGC:").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="AGC:").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                          pady=RIGHT_PADY)
         self.agc_combo = ttk.Combobox(right_controls_frame, textvariable=self.agc_var,
-                                      values=["Off", "Fast", "Medium", "Slow", "Auto"], state="readonly", width=10)
+                                      values=["Off", "Fast", "Medium", "Slow", "Auto"],
+                                      state="readonly", width=10)
         self.agc_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.agc_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="Noise Red. (NR):").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="Noise Red. (NR):").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                                      pady=RIGHT_PADY)
         self.nr_combo = ttk.Combobox(right_controls_frame, textvariable=self.nr_var,
-                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly", width=8)
+                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+                                     state="readonly", width=8)
         self.nr_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.nr_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
         right_row += 1
 
-        ttk.Label(right_controls_frame, text="Noise Bl. (NB):").grid(row=right_row, column=0, sticky="e", padx=(0, 8), pady=RIGHT_PADY)
+        ttk.Label(right_controls_frame, text="Noise Bl. (NB):").grid(row=right_row, column=0, sticky="e", padx=(0, 8),
+                                                                     pady=RIGHT_PADY)
         self.nb_combo = ttk.Combobox(right_controls_frame, textvariable=self.nb_var,
-                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"], state="readonly", width=8)
+                                     values=["Off", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+                                     state="readonly", width=8)
         self.nb_combo.grid(row=right_row, column=1, sticky="w", padx=4, pady=RIGHT_PADY)
         self.nb_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
+        # Bottom status bar
         bottom_frame = ttk.Frame(self.root)
         bottom_frame.pack(fill="x", pady=8, padx=10)
 
-        ttk.Label(bottom_frame, textvariable=self.status_var, font=("Arial", 9)).pack(side="left")
+        # Status label — created here, ready for styling
+        self.status_label = ttk.Label(bottom_frame, textvariable=self.status_var, font=("Arial", 9))
+        self.status_label.pack(side="left")
+
+        # Reconnect button
         reconnect_btn = ttk.Button(bottom_frame, text="Reconnect", command=self.reconnect)
         reconnect_btn.pack(side="right")
+
+    def update_status_style(self, message, color="black", bold=False):
+        if not self.status_label:
+            return
+        self.status_var.set(message)
+        font_style = ("Arial", 9, "bold") if bold else ("Arial", 9)
+        self.status_label.config(foreground=color, font=font_style)
 
     def _display_to_hamlib_mode(self, display_mode):
         """Map UI-displayed mode name to what Hamlib/radio expects."""
@@ -614,7 +667,8 @@ class FTX1MeterMonitor:
 
         # Final status (after all changes)
         if power_valid:
-            self.status_var.set("Changes applied")
+            self.update_status_style("Changes applied", "#006600", bold=True)
+            self.root.after(4000, lambda: self.update_status_style("Connected ✓", "#00CC00", bold=True))
         else:
             self.status_var.set("Changes applied (power unchanged)")
 
@@ -768,7 +822,7 @@ class FTX1MeterMonitor:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.settimeout(5.0)
             self.sock.connect((self.host, self.port))
-            self.status_var.set("Connected ✓")
+            self.update_status_style("Connected ✓", "#00CC00", bold=True)
             self.logger.info("Connected to rigctld")
             return True
         except Exception as e:
@@ -862,7 +916,7 @@ class FTX1MeterMonitor:
         except Exception as e:
             self.logger.error(f"rig_cmd failed '{cmd}': {e}")
             self.sock = None
-            self.status_var.set("Connection dropped - reconnecting...")
+            self.update_status_style("Disconnected — reconnecting...", "red")
             return None
 
     def rig_cmd_lines(self, cmd, num_lines=2, timeout_per_line=2.0):
@@ -931,7 +985,7 @@ class FTX1MeterMonitor:
         except Exception as e:
             print(f"rig_cmd_lines failed '{cmd}': {e}")
             self.sock = None
-            self.status_var.set("Connection dropped - reconnecting...")
+            self.update_status_style("Disconnected — reconnecting...", "red")
             return None
 
     def rig_cmd_extended(self, cmd):
@@ -957,7 +1011,7 @@ class FTX1MeterMonitor:
         except Exception as e:
             print(f"Command failed: {cmd} → {e}")
             self.sock = None
-            self.status_var.set("Connection dropped - reconnecting...")
+            self.update_status_style("Disconnected — reconnecting...", "red")
             return None
 
     def get_hamlib_level(self, cmd):
@@ -1001,7 +1055,7 @@ class FTX1MeterMonitor:
                 self._perform_control_sync()
 
         if not self.sock:
-            self.status_var.set("Disconnected — reconnecting...")
+            self.update_status_style("Disconnected — reconnecting...", "red")
             if not self.reconnect():
                 self.root.after(3000, self.update_readings)
                 return
@@ -1049,11 +1103,11 @@ class FTX1MeterMonitor:
             print(f"Poll error: {e}")
             self.sock = None
 
-        self.status_var.set("Connected ✓")
+        self.update_status_style("Connected ✓", "#00CC00", bold=True)
         self.root.after(1000, self.update_readings)
 
     def reconnect(self):
-        self.status_var.set("Reconnecting...")
+        self.update_status_style("Disconnected — reconnecting...", "red")
         if self.sock:
             try:
                 self.sock.close()
