@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FTX-1 Meter Monitor v1.3 - Hamlib Meters with debug logging
+FTX-1 Meter Monitor v1.3.1 - Hamlib Meters with debug logging
 Only STRENGTH, RFPOWER, SWR, ALC, COMP (no more RFPOWER_METER/VD_METER/ID_METER)
 Polling at 1s, send only on user change
 """
@@ -33,6 +33,10 @@ class FTX1MeterMonitor:
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
 
         self.status_var = tk.StringVar(value="Initializing...")
+        self.is_memory_mode = tk.BooleanVar(value=False)  # False = VFO mode
+        self.freq_frame = None  # will be set in build_gui
+        self.memory_next_btn = None  # dynamic button
+        self.freq_var = tk.StringVar(value="—")
 
         # Standard Hamlib level tokens
         self.left_meters = {
@@ -73,7 +77,7 @@ class FTX1MeterMonitor:
             },
             "VDD": {
                 "hamlib_cmd": "l VD_METER",
-                "scale": lambda r: r / 1.04,
+                "scale": lambda r: r / 1.03,
                 "tx_only": False,
                 "fmt": "{:.1f} V",
                 "max": 15.0
@@ -170,22 +174,35 @@ class FTX1MeterMonitor:
         self.root.after(1000, self._perform_control_sync)
 
     def build_gui(self):
-        # Radio Status (top)
         sf = ttk.LabelFrame(self.root, text="Radio Status")
         sf.pack(fill="x", padx=10, pady=5)
 
-        self.freq_var = tk.StringVar(value="—")
-        ttk.Label(sf, text="Freq:").grid(row=0, column=0, sticky="e", padx=8, pady=3)
-        ttk.Label(sf, textvariable=self.freq_var, font=("Arial", 12, "bold")).grid(row=0, column=1, sticky="w")
+        # Frequency row with V/M toggle and dynamic Next button
+        self.freq_frame = ttk.Frame(sf)  # assign here
+        self.freq_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=3)
 
-        ttk.Label(sf, text="Mode:").grid(row=1, column=0, sticky="e", padx=8, pady=3)
+        ttk.Label(self.freq_frame, text="Freq:").pack(side="left")
+
+        self.freq_entry = ttk.Entry(self.freq_frame, textvariable=self.freq_var, font=("Arial", 12, "bold"), width=12)
+        self.freq_entry.pack(side="left", padx=(5, 0))
+
+        # V/M toggle button
+        self.v_m_btn = ttk.Button(self.freq_frame, text="V/M", width=4, command=self.toggle_vfo_memory)
+        self.v_m_btn.pack(side="left", padx=(10, 5))
+
+        # Placeholder for dynamic "Next Memory" button (will be created in toggle)
+        self.memory_next_btn = None
+
+        # Mode + Bandwidth row
         mode_frame = ttk.Frame(sf)
-        mode_frame.grid(row=1, column=1, sticky="w")
+        mode_frame.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=3)
+
+        ttk.Label(mode_frame, text="Mode:").pack(side="left")
 
         mode_combo = ttk.Combobox(mode_frame, textvariable=self.mode_var,
                                   values=["DATA-U", "DATA-L", "USB", "LSB", "CW-U", "CW-L", "AM", "FM",
                                           "RTTY", "RTTYR"], state="readonly", width=12)
-        mode_combo.pack(side="left")
+        mode_combo.pack(side="left", padx=(5, 0))
         mode_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_controls())
 
         ttk.Label(mode_frame, text="Bandwidth:").pack(side="left", padx=(15, 5))
@@ -374,6 +391,40 @@ class FTX1MeterMonitor:
         }
         return map_hamlib_to_display.get(hamlib_mode, hamlib_mode)
 
+    def toggle_vfo_memory(self):
+        current = self.is_memory_mode.get()
+        new_mode = not current
+        self.is_memory_mode.set(new_mode)
+
+        if new_mode:
+            # Memory mode
+            self.v_m_btn.config(text="M → V")
+            self.freq_entry.config(state="disabled")
+
+            # Show/create Next Memory button
+            if self.memory_next_btn is None:
+                self.memory_next_btn = ttk.Button(self.freq_frame, text="Next Mem", width=8,
+                                                  command=self.next_memory)
+            self.memory_next_btn.pack(side="left", padx=(5, 0))
+        else:
+            # VFO mode
+            self.v_m_btn.config(text="V → M")
+            self.freq_entry.config(state="normal")
+
+            # Hide Next Memory button
+            if self.memory_next_btn:
+                self.memory_next_btn.pack_forget()
+
+        self.logger.info(f"Mode switched to: {'Memory' if new_mode else 'VFO'}")
+        self.update_readings()  # refresh freq/mode display
+
+    def next_memory(self):
+        """Send command to go to next memory channel."""
+        self.logger.debug("Sending next memory channel")
+        self.rig_cmd("MR")  # Yaesu memory up command (adjust if different for FTX-1)
+        # Or use "MC+;" or whatever the CAT manual specifies for "next memory"
+        self.root.after(800, self.update_readings)
+
     def send_raw_cat(self, cat_str):
         if not cat_str.endswith(';'):
             cat_str += ';'
@@ -414,13 +465,42 @@ class FTX1MeterMonitor:
         canvas = self.bar_canvases[m]
         cfg = self.left_meters[m]
 
+        # Format display value
         disp = cfg["fmt"].format(value)
         var.set(disp)
 
         canvas.delete("all")
-        fill_width = min(value / cfg["max"], 1.0) * 100
-        color = "green" if value < cfg["max"] * 0.8 else "orange" if value < cfg["max"] else "red"
-        canvas.create_rectangle(0, 0, fill_width, self.bar_height, fill=color, outline="")
+
+        # Default bar color (gray for unknown)
+        fill_color = "gray"
+
+        # Special color logic for VDD meter
+        if m == "VDD":
+            # Normalize VDD: 10.0 = 0%, 15.0 = 100%
+            norm_value = max(0.0, min(1.0, (value - 10.0) / (15.0 - 10.0)))
+            fill_width = int(100 * norm_value)
+            if 12.0 <= value <= 14.4:
+                fill_color = "green"  # good range
+            elif (value < 12.0 and value >= 11.5) or (value > 14.4 and value <= 14.8):
+                fill_color = "orange"  # caution (yellow-ish)
+            else:
+                fill_color = "red"  # critical (<11.5 or >14.8)
+        else:
+            # Existing logic for other meters
+            fill_width_pct = min(value / cfg["max"], 1.0)
+            if fill_width_pct < 0.8:
+                fill_color = "green"
+            elif fill_width_pct < 1.0:
+                fill_color = "orange"
+            else:
+                fill_color = "red"
+
+        # Draw background
+        canvas.create_rectangle(0, 0, 100, self.bar_height, fill="#333", outline="")
+
+        # Draw filled bar
+        fill_width = int(100 * min(value / cfg["max"], 1.0))
+        canvas.create_rectangle(0, 0, fill_width, self.bar_height, fill=fill_color, outline="")
 
     def _perform_control_sync(self, force=False):
         now = time.time()
@@ -601,6 +681,17 @@ class FTX1MeterMonitor:
                 self.startup_sync_done = True
                 self.root.after(200, self.update_readings)
 
+    def set_frequency(self):
+        if self.is_memory_mode.get():
+            return  # ignore in Memory mode
+        try:
+            freq_str = self.freq_var.get().strip()
+            freq_hz = float(freq_str) * 1_000_000  # assume MHz input
+            self.rig_cmd(f"F {int(freq_hz)}")
+            self.logger.info(f"Frequency set to {freq_hz / 1e6:.6f} MHz")
+        except ValueError:
+            self.status_var.set("Invalid frequency — keeping previous")
+
     def apply_controls(self):
         if not self.sock:
             self.status_var.set("Not connected")
@@ -608,6 +699,7 @@ class FTX1MeterMonitor:
 
         self.last_user_change_time = time.time()
         self.ignore_readback_until = time.time() + 12.0
+        self.freq_entry.bind("<Return>", lambda e: self.set_frequency())
 
         # Power handling (safe ignore on invalid)
         power_w = self.power_var.get()  # already a float from DoubleVar
