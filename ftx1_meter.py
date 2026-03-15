@@ -130,6 +130,10 @@ class FTX1MeterMonitor:
                                    "3500", "4000"]
         self.power_options = [f"{x:.1f}" for x in [i * 0.5 for i in range(1, 21)]]  # 0.5, 1.0, ..., 10.0
 
+        self.is_sub_vfo = tk.BooleanVar(value=False)  # False = Main, True = Sub
+        self.vfo_status_label = None  # we'll create later
+        self.current_vfo = "Main"  # initial assumption; will be queried soon
+
         self.meter_labels = {}
         self.bar_canvases = {}
         self.status_label = None
@@ -170,6 +174,7 @@ class FTX1MeterMonitor:
         self.connect_to_rig()
         self.logger.info("Connect done — waiting 2s before first sync")
         self.root.after(2000, self._startup_control_sync)
+        self.root.after(2500, self._update_vfo_status)
 
         self.root.after(1000, self._perform_control_sync)
 
@@ -177,20 +182,33 @@ class FTX1MeterMonitor:
         sf = ttk.LabelFrame(self.root, text="Radio Status")
         sf.pack(fill="x", padx=10, pady=5)
 
-        # Frequency row with V/M toggle and dynamic Next button
-        self.freq_frame = ttk.Frame(sf)  # assign here
+        # Frequency row: Freq → [entry] → [M/S button] Main/Sub → [V/M button] → [Next Mem?]
+        self.freq_frame = ttk.Frame(sf)
         self.freq_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=3)
 
         ttk.Label(self.freq_frame, text="Freq:").pack(side="left")
 
-        self.freq_entry = ttk.Entry(self.freq_frame, textvariable=self.freq_var, font=("Arial", 12, "bold"), width=12)
-        self.freq_entry.pack(side="left", padx=(5, 0))
+        self.freq_entry = ttk.Entry(self.freq_frame, textvariable=self.freq_var,
+                                    font=("Arial", 12, "bold"), width=14)  # slightly wider
+        self.freq_entry.pack(side="left", padx=(5, 8))
+
+        # ── New: Main/Sub toggle button ───────────────────────────────
+        self.main_sub_btn = ttk.Button(self.freq_frame, text="M/S", width=4,
+                                       command=self.toggle_main_sub)
+        self.main_sub_btn.pack(side="left", padx=(4, 2))
+
+        # Status label: "Main" or "Sub"
+        self.vfo_status_label = ttk.Label(self.freq_frame, text="Main",
+                                          font=("Arial", 10, "bold"),
+                                          width=6, anchor="w")
+        self.vfo_status_label.pack(side="left", padx=(2, 12))
 
         # V/M toggle button
-        self.v_m_btn = ttk.Button(self.freq_frame, text="V/M", width=4, command=self.toggle_vfo_memory)
-        self.v_m_btn.pack(side="left", padx=(10, 5))
+        self.v_m_btn = ttk.Button(self.freq_frame, text="V/M", width=4,
+                                  command=self.toggle_vfo_memory)
+        self.v_m_btn.pack(side="left", padx=(0, 5))
 
-        # Placeholder for dynamic "Next Memory" button (will be created in toggle)
+        # Placeholder for dynamic "Next Memory" button (still appears only in mem mode)
         self.memory_next_btn = None
 
         # Mode + Bandwidth row
@@ -417,6 +435,50 @@ class FTX1MeterMonitor:
 
         self.logger.info(f"Mode switched to: {'Memory' if new_mode else 'VFO'}")
         self.update_readings()  # refresh freq/mode display
+
+    def toggle_main_sub(self):
+        if not self.sock:
+            self.status_var.set("Not connected")
+            return
+
+        # Quick refresh in case out of sync
+        self._update_vfo_status()
+
+        target = "Sub" if self.current_vfo == "Main" else "Main"
+
+        resp = self.rig_cmd(f"V {target}")
+        if resp and "RPRT 0" in resp:
+            self.logger.info(f"Switched to {target}")
+            self.status_var.set(f"Switched to {target}")
+        else:
+            self.logger.warning(f"Switch to {target} failed: {resp}")
+            self.status_var.set(f"Switch to {target} failed")
+
+        # Delay for radio to settle, then refresh
+        self.root.after(400, self._update_vfo_status)
+        self.last_user_change_time = time.time()
+        self.root.after(800, self.update_readings)
+
+    def _update_vfo_status(self):
+        if not self.sock:
+            self.vfo_status_label.config(text="?—")
+            return
+
+        resp = self.rig_cmd("v")
+        if resp:
+            vfo_str = resp.strip()
+            if vfo_str in ["Main", "Sub"]:
+                self.current_vfo = vfo_str
+                self.vfo_status_label.config(
+                    text=vfo_str,
+                    foreground="#00AAFF" if vfo_str == "Sub" else "#FFFFFF"
+                )
+                self.logger.debug(f"Active VFO: {vfo_str}")
+            else:
+                self.vfo_status_label.config(text="?—")
+                self.logger.warning(f"Unexpected vfo response: {resp}")
+        else:
+            self.vfo_status_label.config(text="?—")
 
     def next_memory(self):
         """Send command to go to next memory channel."""
@@ -1142,6 +1204,9 @@ class FTX1MeterMonitor:
 
     def update_readings(self):
         now = time.time()
+        if now - self.last_user_change_time > 1.5:  # not right after user action
+            self._update_vfo_status()
+
         if now - self.last_control_sync_time > self.control_sync_interval:
             if time.time() >= self.ignore_readback_until:
                 self._perform_control_sync()
