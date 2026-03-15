@@ -34,8 +34,8 @@ class FTX1MeterMonitor:
 
         self.status_var = tk.StringVar(value="Initializing...")
         self.is_memory_mode = tk.BooleanVar(value=False)  # False = VFO mode
-        self.freq_frame = None  # will be set in build_gui
-        self.memory_next_btn = None  # dynamic button
+        self.freq_frame = None
+        self.memory_next_btn = None
         self.freq_var = tk.StringVar(value="—")
 
         # Standard Hamlib level tokens
@@ -131,8 +131,8 @@ class FTX1MeterMonitor:
         self.power_options = [f"{x:.1f}" for x in [i * 0.5 for i in range(1, 21)]]  # 0.5, 1.0, ..., 10.0
 
         self.is_sub_vfo = tk.BooleanVar(value=False)  # False = Main, True = Sub
-        self.vfo_status_label = None  # we'll create later
-        self.current_vfo = "Main"  # initial assumption; will be queried soon
+        self.vfo_status_label = None
+        self.current_vfo = "Main"
 
         self.meter_labels = {}
         self.bar_canvases = {}
@@ -172,9 +172,12 @@ class FTX1MeterMonitor:
         self.build_gui()
         self.update_status_style(f"Connecting to {host}:{port}...", "gray")
         self.connect_to_rig()
-        self.logger.info("Connect done — waiting 2s before first sync")
+        self.logger.info("Connect done — waiting for startup sync")
+
+        # Startup sequence
         self.root.after(2000, self._startup_control_sync)
         self.root.after(2500, self._update_vfo_status)
+        self.root.after(3500, self._startup_sync_via_IF)  # NEW: IF-based sync
 
         self.root.after(1000, self._perform_control_sync)
 
@@ -409,32 +412,140 @@ class FTX1MeterMonitor:
         }
         return map_hamlib_to_display.get(hamlib_mode, hamlib_mode)
 
+    def _force_memory_refresh(self):
+        """Called after V/M toggle or Next Mem — makes sure channel + freq appear instantly."""
+        if not self.is_memory_mode.get():
+            return
+        # Give the radio 400 ms to settle, then force a full poll
+        self.root.after(400, self.update_readings)
+
+    def _startup_sync_via_IF(self):
+        if not self.sock:
+            self.logger.warning("No socket for IF startup sync")
+            return
+
+        self.logger.info("Performing startup sync using IF; (freq + mode + VFO/Memory state)...")
+
+        resp = self.rig_cmd("w IF;")
+        if not resp or not resp.startswith("IF"):
+            self.logger.warning(f"IF; query failed or invalid response: {resp}")
+            self.status_var.set("Startup sync partial (IF failed)")
+            self.root.after(200, self.update_readings)
+            return
+
+        try:
+            # Example response: IF0 0000007258000+000000100003;
+            # Remove "IF" and trailing ";"
+            data = resp[2:].rstrip(";")  # "0 0000007258000+000000100003"
+
+            # Remove leading "0 " if present (some responses have space after P1)
+            if data.startswith("0 "):
+                data = data[2:]
+
+            # Fixed positions (no spaces in concatenated format)
+            # 0-10:   frequency (11 digits)
+            # 11-22:  clarifier offset (12 chars, signed)
+            # 23:     RX clarifier on/off
+            # 24:     TX clarifier on/off
+            # 25-26:  mode (2 digits)
+            # 27:     P7 = VFO/Memory status (1 digit)
+
+            freq_raw = data[0:11]
+            freq_hz = int(freq_raw)
+            freq_mhz = freq_hz / 1_000_000.0
+            self.freq_var.set(f"{freq_mhz:.6f} MHz")
+            self.logger.debug(f"Startup freq from IF: {freq_mhz:.6f} MHz")
+
+            # Mode code (P6, 2 digits)
+            mode_code = data[25:27]
+            mode_map = {
+                "00": "LSB", "01": "USB", "02": "CW-U", "03": "CW-L",
+                "04": "RTTY", "05": "AM", "06": "FM", "08": "DATA-U", "09": "DATA-L",
+                # Add more as needed based on actual responses
+            }
+            display_mode = mode_map.get(mode_code, "—")
+            self.mode_var.set(display_mode)
+            self.update_bw_combo_options()
+            self.logger.debug(f"Startup mode from IF: {display_mode} (code {mode_code})")
+
+            # VFO/Memory status (P7, 1 digit)
+            p7 = data[27:28]
+            is_memory = p7 in ["1", "2"]  # 1=Memory Channel, 2=Memory Tune
+            self.is_memory_mode.set(is_memory)
+
+            # Update UI based on mode
+            if is_memory:
+                self.v_m_btn.config(text="M → V")
+                self.freq_entry.config(state="disabled")
+                if self.memory_next_btn is None:
+                    self.memory_next_btn = ttk.Button(self.freq_frame, text="Next Mem", width=8,
+                                                      command=self.next_memory)
+                self.memory_next_btn.pack(side="left", padx=(5, 0))
+            else:
+                self.v_m_btn.config(text="V → M")
+                self.freq_entry.config(state="normal")
+                if self.memory_next_btn:
+                    self.memory_next_btn.pack_forget()
+
+            self.logger.info(f"Startup sync complete: {'Memory' if is_memory else 'VFO'} mode (P7={p7})")
+            self.status_var.set(f"Startup: {'Memory' if is_memory else 'VFO'} mode")
+
+        except (IndexError, ValueError) as e:
+            self.logger.error(f"IF; parse error: {e} - raw response: {resp}")
+            self.status_var.set("Startup sync partial (parse error)")
+            # Fallback: assume VFO
+            self.is_memory_mode.set(False)
+            self.v_m_btn.config(text="V → M")
+            self.freq_entry.config(state="normal")
+
+        # Always do final refresh
+        self.root.after(400, self.update_readings)
+
     def toggle_vfo_memory(self):
+        if not self.sock:
+            self.status_var.set("Not connected")
+            return
+
+        # Send the toggle command
+        resp = self.rig_cmd("w VM;")
+
+        # For VM; we expect either no response, empty, echo, or RPRT 0
+        is_success = True
+        if resp is not None:
+            resp_clean = resp.strip()
+            if "RPRT" in resp_clean and "0" not in resp_clean.split("RPRT")[1].strip():
+                is_success = False
+            if resp_clean in ["VM;", "VM", ""]:
+                self.logger.debug("VM; accepted (expected no/empty response)")
+
+        if not is_success:
+            self.status_var.set("V/M toggle failed on radio")
+            self.logger.warning(f"VM; command failed: {resp}")
+            return
+
+        # Flip local state
         current = self.is_memory_mode.get()
         new_mode = not current
         self.is_memory_mode.set(new_mode)
 
         if new_mode:
-            # Memory mode
             self.v_m_btn.config(text="M → V")
             self.freq_entry.config(state="disabled")
-
-            # Show/create Next Memory button
             if self.memory_next_btn is None:
                 self.memory_next_btn = ttk.Button(self.freq_frame, text="Next Mem", width=8,
                                                   command=self.next_memory)
             self.memory_next_btn.pack(side="left", padx=(5, 0))
         else:
-            # VFO mode
             self.v_m_btn.config(text="V → M")
             self.freq_entry.config(state="normal")
-
-            # Hide Next Memory button
             if self.memory_next_btn:
                 self.memory_next_btn.pack_forget()
 
-        self.logger.info(f"Mode switched to: {'Memory' if new_mode else 'VFO'}")
-        self.update_readings()  # refresh freq/mode display
+        self.logger.info(f"Radio mode switched to: {'Memory' if new_mode else 'VFO'}")
+        self.status_var.set(f"Switched to {'Memory' if new_mode else 'VFO'} mode")
+
+        # Refresh after radio settles
+        self.root.after(600, self.update_readings)
 
     def toggle_main_sub(self):
         if not self.sock:
@@ -481,11 +592,16 @@ class FTX1MeterMonitor:
             self.vfo_status_label.config(text="?—")
 
     def next_memory(self):
-        """Send command to go to next memory channel."""
+        """Go to the next memory channel (FTX-1 uses MC+;)."""
         self.logger.debug("Sending next memory channel")
-        self.rig_cmd("MR")  # Yaesu memory up command (adjust if different for FTX-1)
-        # Or use "MC+;" or whatever the CAT manual specifies for "next memory"
-        self.root.after(800, self.update_readings)
+        resp = self.rig_cmd("w MC+;")
+        if resp and "MC" in resp:
+            self.logger.info("Next memory channel sent")
+        else:
+            self.logger.warning(f"Next memory may have failed: {resp}")
+
+        # Refresh display immediately
+        self.root.after(400, self.update_readings)
 
     def send_raw_cat(self, cat_str):
         if not cat_str.endswith(';'):
@@ -1219,29 +1335,65 @@ class FTX1MeterMonitor:
 
         try:
             self._drain_socket()
-            f = self.rig_cmd("f")
-            if f and f.replace(".", "").replace("-", "").isdigit():
-                try:
-                    freq_mhz = float(f) / 1_000_000
-                    self.freq_var.set(f"{freq_mhz:.6f} MHz")
-                except ValueError:
+
+            if not self.is_memory_mode.get():
+                # VFO mode: normal freq + mode polling
+                f = self.rig_cmd("f")
+                if f and f.replace(".", "").replace("-", "").isdigit():
+                    try:
+                        freq_mhz = float(f) / 1_000_000
+                        self.freq_var.set(f"{freq_mhz:.6f} MHz")
+                    except ValueError:
+                        self.freq_var.set("—")
+                else:
                     self.freq_var.set("—")
-            else:
-                self.freq_var.set("—")
 
-            # Mode (trust m for mode only)
-            mode_lines = self.rig_cmd_lines("m", num_lines=2)
-            if mode_lines and len(mode_lines) >= 1:
-                hamlib_mode = mode_lines[0].strip() or "—"
-                display_mode = self._hamlib_to_display_mode(hamlib_mode)
-                self.mode_var.set(display_mode)
-                self.logger.debug(f"Mode polled: received '{hamlib_mode}' → displayed '{display_mode}'")
-                self.update_bw_combo_options()
-            else:
-                self.mode_var.set("—")
-                self.bw_combo.set(self.current_bw_str or "—")
+                mode_lines = self.rig_cmd_lines("m", num_lines=2)
+                if mode_lines and len(mode_lines) >= 1:
+                    hamlib_mode = mode_lines[0].strip() or "—"
+                    display_mode = self._hamlib_to_display_mode(hamlib_mode)
+                    self.mode_var.set(display_mode)
+                    self.logger.debug(f"Mode polled: received '{hamlib_mode}' → displayed '{display_mode}'")
+                    self.update_bw_combo_options()
+                else:
+                    self.mode_var.set("—")
+                    self.bw_combo.set(self.current_bw_str or "—")
 
-            # Meters (unchanged)
+            else:
+                # Memory mode: show channel + frequency
+                freq_str = "—"
+                f = self.rig_cmd("f")
+                if f and f.replace(".", "").replace("-", "").isdigit():
+                    try:
+                        freq_mhz = float(f) / 1_000_000
+                        freq_str = f"{freq_mhz:.6f} MHz"
+                    except ValueError:
+                        pass
+
+                # Get memory channel number
+                mc_resp = self.rig_cmd("w MC;")
+                channel_str = "??"
+                if mc_resp and mc_resp.startswith("MC"):
+                    # Parse MC005; → 005 → strip leading zeros
+                    ch_raw = mc_resp[2:].rstrip(";").lstrip("0")
+                    channel_str = ch_raw if ch_raw else "0"
+
+                # Combined display
+                self.freq_var.set(f"CH {channel_str}  {freq_str}")
+
+                # Mode may still be readable in memory mode — try it
+                mode_lines = self.rig_cmd_lines("m", num_lines=2)
+                if mode_lines and len(mode_lines) >= 1:
+                    hamlib_mode = mode_lines[0].strip() or "—"
+                    display_mode = self._hamlib_to_display_mode(hamlib_mode)
+                    self.mode_var.set(display_mode)
+                    self.logger.debug(f"Memory mode polled: '{hamlib_mode}' → '{display_mode}'")
+                    self.update_bw_combo_options()
+                else:
+                    self.mode_var.set("—")
+                    self.bw_combo.set(self.current_bw_str or "—")
+
+            # Meters — update regardless (usually work in memory mode)
             for name, cfg in self.left_meters.items():
                 raw_str = self.get_hamlib_level(cfg["hamlib_cmd"])
                 if raw_str is None:
@@ -1257,8 +1409,9 @@ class FTX1MeterMonitor:
                     self.update_meter_gui(name, 0.0)
 
         except Exception as e:
-            print(f"Poll error: {e}")
+            self.logger.error(f"Polling error: {e}")
             self.sock = None
+            self.freq_var.set("Polling Err")
 
         self.update_status_style("Connected ✓", "#00CC00", bold=True)
         self.root.after(1000, self.update_readings)
