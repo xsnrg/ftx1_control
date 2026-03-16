@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FTX-1 Meter Monitor v1.3.1 - Hamlib Meters with debug logging
+FTX-1 Meter Monitor v1.3.2 - Hamlib Meters with debug logging
 Only STRENGTH, RFPOWER, SWR, ALC, COMP (no more RFPOWER_METER/VD_METER/ID_METER)
 Polling at 1s, send only on user change
 """
@@ -27,7 +27,7 @@ class FTX1MeterMonitor:
         self.sock = None
 
         self.root = tk.Tk()
-        self.root.title("FTX-1 Meter Monitor v1.3 - Hamlib Meters")
+        self.root.title("FTX-1 Meter Monitor v1.3.2")
         self.root.geometry("550x485")
         self.root.resizable(True, True)
         self.root.protocol("WM_DELETE_WINDOW", self.quit_app)
