@@ -1,4 +1,4 @@
-![img_1.png](img_1.png)
+![img.png](img.png)
 
 # FTX-1 Meter Monitor
 
