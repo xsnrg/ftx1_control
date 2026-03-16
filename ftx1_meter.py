@@ -140,7 +140,7 @@ class FTX1MeterMonitor:
         self.smoothed_values = {k: 0.0 for k in self.left_meters}
 
         self.smoothing_alpha = 0.2
-        self.bar_height = 6
+        self.bar_height = 8
 
         self.power_var = tk.DoubleVar()
         self.preamp_var = tk.StringVar()
@@ -500,7 +500,7 @@ class FTX1MeterMonitor:
                 self.current_vfo = vfo_str
                 self.vfo_status_label.config(
                     text=vfo_str,
-                    foreground="#00AAFF" if vfo_str == "Sub" else "#FFFFFF"
+                    foreground="green" if vfo_str == "Sub" else "blue"
                 )
                 self.logger.debug(f"Active VFO: {vfo_str}")
             else:
