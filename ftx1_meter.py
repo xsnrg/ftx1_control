@@ -137,9 +137,6 @@ class FTX1MeterMonitor:
         self.meter_labels = {}
         self.bar_canvases = {}
         self.status_label = None
-        self.smoothed_values = {k: 0.0 for k in self.left_meters}
-
-        self.smoothing_alpha = 0.2
         self.bar_height = 8
 
         self.power_var = tk.DoubleVar()
@@ -150,12 +147,9 @@ class FTX1MeterMonitor:
         self.nr_var = tk.StringVar()
         self.nb_var = tk.StringVar()
         self.mode_var = tk.StringVar()
-        self.filter_var = tk.StringVar(value="—")
 
-        self.initial_bw_synced = False
         self.current_bw_str = "—"
 
-        self.last_set = {}
         self.ignore_readback_until = 0.0
 
         self.startup_sync_done = False
@@ -307,7 +301,6 @@ class FTX1MeterMonitor:
                 pady=(1, ROW_PADY + 2)
             )
             self.bar_canvases[m] = canvas
-            self.smoothed_values[m] = 0.0
 
             row += 2
 
@@ -897,7 +890,6 @@ class FTX1MeterMonitor:
             else:
                 self.current_bw_str = bw_str
                 self.bw_combo.set(bw_str)
-                self.last_bw_change_time = time.time()
                 self.status_var.set(f"Bandwidth set to {bw} Hz ({raw_cmd})")
                 self.logger.info(f"BW updated in UI: {bw_str} Hz")
 
@@ -907,93 +899,6 @@ class FTX1MeterMonitor:
         except Exception as e:
             self.status_var.set(f"Error setting BW: {e}")
             self.logger.error(f"set_bandwidth exception: {e}")
-
-    def format_smeter(self, raw_str):
-        try:
-            v = float(raw_str)
-            return f"{v:.1f} dB"
-        except:
-            return "—"
-
-    def format_value(self, name, val):
-        if not val: return "—"
-        try:
-            v = float(val)
-            if name == "RFPOWER":
-                return f"{v * 10:.1f} W"
-            if name == "SWR":
-                return f"{v:.2f}"
-            if name == "STRENGTH":
-                return self.format_smeter(val)
-            if name == "COMP":
-                return f"{v:.1f}"
-            return f"{v:.2f}"
-        except:
-            return val
-
-    def update_progress_bar(self, name, raw_val):
-        canvas = self.bar_canvases.get(name)
-        if not canvas: return
-
-        try:
-            v = float(raw_val) if raw_val not in ["—", ""] else 0
-        except:
-            v = 0
-
-        old = self.smoothed_values.get(name, 0.0)
-        smoothed = self.smoothing_alpha * v + (1 - self.smoothing_alpha) * old
-        self.smoothed_values[name] = smoothed
-
-        canvas.delete("all")
-
-        width = 100
-        height = self.bar_height
-
-        if name == "RFPOWER":
-            pct = min(smoothed, 1.0)
-            fill_color = "lime"
-        elif name == "SWR":
-            pct = min(max((smoothed - 1.0) / 4.0, 0), 1.0)
-            if smoothed > 2.5:
-                fill_color = "red"
-            elif smoothed > 1.7:
-                fill_color = "orange"
-            else:
-                fill_color = "lime"
-        elif name == "ALC":
-            pct = min(smoothed, 1.0)
-            if smoothed > 0.7:
-                fill_color = "red"
-            elif smoothed > 0.4:
-                fill_color = "orange"
-            else:
-                fill_color = "lime"
-        elif name == "STRENGTH":
-            try:
-                abs_raw = abs(float(raw_val))
-                pct = min(abs_raw / 60.0, 1.0)
-            except:
-                pct = 0
-            old_pct = self.smoothed_values.get(name + "_pct", 0.0)
-            smoothed_pct = self.smoothing_alpha * pct + (1 - self.smoothing_alpha) * old_pct
-            self.smoothed_values[name + "_pct"] = smoothed_pct
-            pct = smoothed_pct
-            if pct > 0.9:
-                fill_color = "red"
-            elif pct > 0.7:
-                fill_color = "orange"
-            else:
-                fill_color = "lime"
-        elif name == "COMP":
-            pct = min(smoothed, 1.0)
-            fill_color = "lime"
-        else:
-            pct = 0
-            fill_color = "gray"
-
-        canvas.create_rectangle(0, 0, width, height, fill="#333", outline="")
-        fill_width = int(width * pct)
-        canvas.create_rectangle(0, 0, fill_width, height, fill=fill_color, outline="")
 
     def connect_to_rig(self):
         try:
@@ -1095,101 +1000,6 @@ class FTX1MeterMonitor:
             return None  # don't kill socket on timeout
         except Exception as e:
             self.logger.error(f"rig_cmd failed '{cmd}': {e}")
-            self.sock = None
-            self.update_status_style("Disconnected — reconnecting...", "red")
-            return None
-
-    def rig_cmd_lines(self, cmd, num_lines=2, timeout_per_line=2.0):
-        if not self.sock:
-            return None
-        try:
-            self._drain_socket()  # clean start
-
-            self.logger.debug(f"Sending multi-line: {cmd}")
-            self.sock.sendall((cmd + "\n").encode('ascii'))
-
-            self.sock.settimeout(timeout_per_line * num_lines + 1.0)
-            lines = []
-            buf = bytearray()
-            attempts = 0
-            max_attempts = num_lines * 3
-
-            while len(lines) < num_lines and attempts < max_attempts:
-                attempts += 1
-                try:
-                    chunk = self.sock.recv(4096)
-                    if not chunk:
-                        raise socket.timeout("Connection closed during multi-line read")
-                    buf.extend(chunk)
-
-                    # Split on \n as much as possible
-                    while b'\n' in buf:
-                        line_bytes, buf = buf.split(b'\n', 1)
-                        line = line_bytes.decode('ascii', errors='ignore').strip()
-                        if line:
-                            if "RPRT" in line:
-                                code = int(line.split("RPRT")[1].strip()) if "RPRT" in line else -1
-                                if code != 0:
-                                    self.logger.debug(f"Multi-line RPRT error {code} for {cmd}")
-                                    return None
-                            lines.append(line)
-                            self.logger.debug(f"Multi-line read: {line}")
-                except socket.timeout:
-                    self.logger.debug(f"Timeout waiting for line {len(lines) + 1}/{num_lines} of {cmd}")
-                    break
-
-            # If we have partial buf left, try one more short read
-            if buf and len(lines) < num_lines:
-                try:
-                    self.sock.settimeout(0.5)
-                    extra = self.sock.recv(512)
-                    if extra:
-                        buf.extend(extra)
-                except:
-                    pass
-
-            # Handle single-line custom separator fallback
-            if len(lines) == 1 and lines[0]:
-                for sep in ['$', '@', '|', ';']:
-                    if sep in lines[0]:
-                        lines = [p.strip() for p in lines[0].split(sep) if p.strip()]
-                        break
-
-            if len(lines) >= num_lines:
-                self.logger.debug(f"Multi-line success: {lines[:num_lines]}")
-                return lines[:num_lines]
-            else:
-                print(f"Multi-line incomplete: got {len(lines)} of {num_lines}")
-                return None
-
-        except Exception as e:
-            print(f"rig_cmd_lines failed '{cmd}': {e}")
-            self.sock = None
-            self.update_status_style("Disconnected — reconnecting...", "red")
-            return None
-
-    def rig_cmd_extended(self, cmd):
-        """Send a command using extended protocol (+). For multi-line responses."""
-        if not self.sock: return None
-        try:
-            self.sock.sendall(("+" + cmd + "\n").encode('ascii'))
-            result_lines = []
-            while True:
-                line = self._read_line()
-                if "RPRT" in line:
-                    break
-                # Skip the echo/command line (e.g. "get_mode:")
-                # It ends with ':' but has no value after it
-                if line.endswith(":"):
-                    continue
-                # Extended responses have "Key: Value" format — extract the value
-                if ": " in line:
-                    line = line.split(": ", 1)[1]
-                result_lines.append(line)
-            resp = "\n".join(result_lines)
-            return resp if resp else None
-        except Exception as e:
-            print(f"Command failed: {cmd} → {e}")
             self.sock = None
             self.update_status_style("Disconnected — reconnecting...", "red")
             return None
