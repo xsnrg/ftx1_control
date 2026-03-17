@@ -797,18 +797,15 @@ class FTX1MeterMonitor:
         if power_valid:
             power_raw = power_w / 10.0
             self.rig_cmd(f"L RFPOWER {power_raw:.2f}")
-            self.last_set["power"] = power_raw
             self.status_var.set(f"Power set to {power_w:.1f} W")
 
         # Other controls (always apply)
         sql_val = self.sql_var.get()
         self.rig_cmd(f"L SQL {sql_val:.2f}")
-        self.last_set["sql"] = sql_val
 
         agc_map = {"Off": 0, "Fast": 1, "Medium": 2, "Slow": 3, "Auto": 6}
         agc_val = agc_map.get(self.agc_var.get(), 0)
         self.rig_cmd(f"L AGC {agc_val}")
-        self.last_set["agc"] = agc_val
 
         # NR
         nr_display = self.nr_var.get()
@@ -824,20 +821,17 @@ class FTX1MeterMonitor:
 
         nr_normalized = nr_int / 10.0
         self.rig_cmd(f"L NR {nr_normalized:.4f}")
-        self.last_set["nr"] = nr_normalized
 
         # NB
         nb_display = self.nb_var.get()
         nb_val = 0 if nb_display == "Off" else int(nb_display)
         self.rig_cmd(f"L NB {nb_val}")
-        self.last_set["nb"] = nb_val
 
         # Mode
         mode_str = self.mode_var.get().strip()
         if mode_str and mode_str != "—":
             hamlib_mode = self._display_to_hamlib_mode(mode_str)
             self.rig_cmd(f"M {hamlib_mode} 0")
-            self.last_set["mode"] = hamlib_mode
             self.logger.debug(f"Mode set: displayed '{mode_str}' → sent '{hamlib_mode}'")
 
         # Final status (after all changes)
