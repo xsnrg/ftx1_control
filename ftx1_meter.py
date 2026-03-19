@@ -418,40 +418,29 @@ class FTX1MeterMonitor:
             self.status_var.set("Not connected")
             return
 
-        # Decide target based on latest known state
-        if self.last_mode_type is not None and self.last_mode_type in "012345":
-            # Reliable recent poll data
-            current_is_mem = self.last_mode_type in ["1", "2", "3", "5"]
-            target_is_mem = not current_is_mem
-            cmd = f"w VM{1 if target_is_mem else 0};"
-            self.logger.debug(f"Using explicit set from last poll (P7={self.last_mode_type}): {cmd}")
+        # FTX-1 CAT manual: VM; = toggle VFO ↔ Memory (exactly like pressing the front-panel button)
+        cmd = "w VM;"
+        resp = self.rig_cmd(cmd, timeout=3.0)
 
-        resp = self.rig_cmd(cmd, timeout=3.0)  # slightly longer timeout is fine
+        # Assume success (Yaesu set commands usually return nothing or timeout — normal)
+        self.logger.info(f"Sent VM; toggle (response: {resp!r})")
 
-        # Assume success on timeout/empty/echo (typical for Yaesu set commands)
-        success = True
-        if resp is not None:
-            resp_clean = resp.strip()
-            if "RPRT" in resp_clean:
-                if "0" not in resp_clean.split("RPRT", 1)[1].strip():
-                    success = False
-            self.logger.debug(f"Response to {cmd}: {resp!r}")
-        else:
-            self.logger.debug(f"No response to {cmd} — assuming success (common)")
+        # === DEBOUNCE PROTECTION (prevents polling from snapping us back) ===
+        self.last_user_change_time = time.time()
+        self.ignore_readback_until = time.time() + 3.0  # radio needs ~200-500 ms to update
 
-        if not success:
-            self.status_var.set("Command may have failed — check radio")
-            self.logger.warning(f"{cmd} possibly failed: {resp}")
-            # Still proceed optimistically
-
+        # Immediately flip our local state + UI (we know it toggled)
+        target_is_mem = not self.is_memory_mode.get()
         self.is_memory_mode.set(target_is_mem)
 
         if target_is_mem:
-            self.v_m_btn.config(text="M / V")
+            self.v_m_btn.config(text="M → V")
             self.freq_entry.config(state="disabled")
             if self.memory_next_btn is None:
-                self.memory_next_btn = ttk.Button(self.freq_frame, text="Next Mem", width=8,
-                                                  command=self.next_memory)
+                self.memory_next_btn = ttk.Button(
+                    self.freq_frame, text="Next Mem", width=8,
+                    command=self.next_memory
+                )
             self.memory_next_btn.pack(side="left", padx=(5, 0))
         else:
             self.v_m_btn.config(text="V → M")
@@ -459,8 +448,8 @@ class FTX1MeterMonitor:
             if self.memory_next_btn:
                 self.memory_next_btn.pack_forget()
 
-        self.logger.info(f"Requested switch to {'Memory' if target_is_mem else 'VFO'} mode")
-        self.status_var.set(f"Switching to {'Memory' if target_is_mem else 'VFO'} mode...")
+        self.status_var.set(f"Switched to {'Memory' if target_is_mem else 'VFO'} mode")
+        self.logger.info(f"Requested toggle → {'Memory' if target_is_mem else 'VFO'}")
 
     def toggle_main_sub(self):
         if not self.sock:
@@ -637,15 +626,22 @@ class FTX1MeterMonitor:
         else:
             self.power_var.set("0.5")
 
-        # PREAMP: 0=IPO, 1=AMP1, 2=AMP2
-        resp = self.rig_cmd("l PREAMP")
-        self.logger.debug(f"l PREAMP → {resp}")
+            # PREAMP: Hamlib returns 0=IPO, 10=AMP1, 20=AMP2
+            resp = self.rig_cmd("l PREAMP")
+            self.logger.debug(f"l PREAMP → {resp}")
 
-        def set_preamp(v):
-            map_ = {0: "IPO", 1: "AMP1", 2: "AMP2"}
-            self.preamp_var.set(map_.get(int(round(v)), "IPO"))  # round if float
+            def set_preamp(v):
+                val = int(round(v))
+                if val == 0:
+                    self.preamp_var.set("IPO")
+                elif val == 10:
+                    self.preamp_var.set("AMP1")
+                elif val == 20:
+                    self.preamp_var.set("AMP2")
+                else:
+                    self.preamp_var.set("IPO")
 
-        try_set(None, resp, parser=float, setter=set_preamp)
+            try_set(None, resp, parser=float, setter=set_preamp)
 
         # ATT: 0=Off, 6=-6, 12=-12, 18=-18
         resp = self.rig_cmd("l ATT")
@@ -798,6 +794,12 @@ class FTX1MeterMonitor:
             power_raw = power_w / 10.0
             self.rig_cmd(f"L RFPOWER {power_raw:.2f}")
             self.status_var.set(f"Power set to {power_w:.1f} W")
+
+        preamp_str = self.preamp_var.get()
+        preamp_map = {"IPO": 0, "AMP1": 10, "AMP2": 20}
+        preamp_val = preamp_map.get(preamp_str, 0)
+        self.rig_cmd(f"L PREAMP {preamp_val}")
+        self.logger.debug(f"PREAMP set via Hamlib → {preamp_str} (level {preamp_val})")
 
         # Other controls (always apply)
         sql_val = self.sql_var.get()
@@ -1093,7 +1095,7 @@ class FTX1MeterMonitor:
                 is_memory = mode_type in ["1", "2", "3", "5"]  # Memory Channel, Memory Tune, QMB, PMS
 
                 # Sync local state + UI if changed (catches manual radio changes)
-                if is_memory != self.is_memory_mode.get():
+                if time.time() >= self.ignore_readback_until and is_memory != self.is_memory_mode.get():
                     self.is_memory_mode.set(is_memory)
                     if is_memory:
                         self.v_m_btn.config(text="M → V")
