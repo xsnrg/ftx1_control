@@ -35,7 +35,7 @@ class FTX1MeterMonitor:
         self.status_var = tk.StringVar(value="Initializing...")
         self.is_memory_mode = tk.BooleanVar(value=False)  # False = VFO mode
         self.freq_frame = None
-        self.memory_next_btn = None
+        self.memory_channel_var = tk.StringVar(value="001")  # default or last used
         self.freq_var = tk.StringVar(value="—")
 
         # Standard Hamlib level tokens
@@ -151,6 +151,7 @@ class FTX1MeterMonitor:
         self.current_bw_str = "—"
 
         self.ignore_readback_until = 0.0
+        self._poll_running = False
 
         self.startup_sync_done = False
         self.startup_retries = 0
@@ -182,34 +183,44 @@ class FTX1MeterMonitor:
         sf = ttk.LabelFrame(self.root, text="Radio Status")
         sf.pack(fill="x", padx=10, pady=5)
 
-        # Frequency row: Freq → [entry] → [M/S button] Main/Sub → [V/M button] → [Next Mem?]
         self.freq_frame = ttk.Frame(sf)
         self.freq_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=3)
 
         ttk.Label(self.freq_frame, text="Freq:").pack(side="left")
 
         self.freq_entry = ttk.Entry(self.freq_frame, textvariable=self.freq_var,
-                                    font=("Arial", 12, "bold"), width=14)  # slightly wider
+                                    font=("Arial", 12, "bold"), width=14)
         self.freq_entry.pack(side="left", padx=(5, 8))
 
-        # ── New: Main/Sub toggle button ───────────────────────────────
         self.main_sub_btn = ttk.Button(self.freq_frame, text="M/S", width=4,
                                        command=self.toggle_main_sub)
         self.main_sub_btn.pack(side="left", padx=(4, 2))
 
-        # Status label: "Main" or "Sub"
         self.vfo_status_label = ttk.Label(self.freq_frame, text="Main",
                                           font=("Arial", 10, "bold"),
                                           width=6, anchor="w")
         self.vfo_status_label.pack(side="left", padx=(2, 12))
 
-        # V/M toggle button
         self.v_m_btn = ttk.Button(self.freq_frame, text="V/M", width=4,
                                   command=self.switch_vfo_memory)
         self.v_m_btn.pack(side="left", padx=(0, 5))
 
-        # Placeholder for dynamic "Next Memory" button (still appears only in mem mode)
-        self.memory_next_btn = None
+        # Memory channel selector (wider for 5 digits)
+        self.memory_entry = ttk.Entry(
+            self.freq_frame,
+            textvariable=self.memory_channel_var,
+            width=8,  # for "00002" or "50002"
+            font=("Arial", 10),
+            justify="center"
+        )
+        self.memory_entry.bind("<Return>", self.jump_to_memory_channel)
+
+        self.memory_go_btn = ttk.Button(
+            self.freq_frame,
+            text="Go",
+            width=5,
+            command=self.jump_to_memory_channel
+        )
 
         # Mode + Bandwidth row
         mode_frame = ttk.Frame(sf)
@@ -418,38 +429,35 @@ class FTX1MeterMonitor:
             self.status_var.set("Not connected")
             return
 
-        # FTX-1 CAT manual: VM; = toggle VFO ↔ Memory (exactly like pressing the front-panel button)
-        cmd = "w VM;"
-        resp = self.rig_cmd(cmd, timeout=3.0)
-
-        # Assume success (Yaesu set commands usually return nothing or timeout — normal)
+        resp = self.rig_cmd("w VM;", timeout=3.0)
         self.logger.info(f"Sent VM; toggle (response: {resp!r})")
 
-        # === DEBOUNCE PROTECTION (prevents polling from snapping us back) ===
         self.last_user_change_time = time.time()
-        self.ignore_readback_until = time.time() + 3.0  # radio needs ~200-500 ms to update
+        self.ignore_readback_until = time.time() + 3.0
 
-        # Immediately flip our local state + UI (we know it toggled)
         target_is_mem = not self.is_memory_mode.get()
         self.is_memory_mode.set(target_is_mem)
 
         if target_is_mem:
             self.v_m_btn.config(text="M → V")
             self.freq_entry.config(state="disabled")
-            if self.memory_next_btn is None:
-                self.memory_next_btn = ttk.Button(
-                    self.freq_frame, text="Next Mem", width=8,
-                    command=self.next_memory
-                )
-            self.memory_next_btn.pack(side="left", padx=(5, 0))
+            self.memory_entry.pack(side="left", padx=(5, 2))
+            self.memory_go_btn.pack(side="left", padx=(0, 5))
+
+            # Pre-fill with current channel
+            _, current_ch = self.get_current_memory_channel()
+            if current_ch is not None:
+                self.memory_channel_var.set(f"{current_ch:05d}")
+            else:
+                self.memory_channel_var.set("00001")
+
         else:
             self.v_m_btn.config(text="V → M")
             self.freq_entry.config(state="normal")
-            if self.memory_next_btn:
-                self.memory_next_btn.pack_forget()
+            self.memory_entry.pack_forget()
+            self.memory_go_btn.pack_forget()
 
         self.status_var.set(f"Switched to {'Memory' if target_is_mem else 'VFO'} mode")
-        self.logger.info(f"Requested toggle → {'Memory' if target_is_mem else 'VFO'}")
 
     def toggle_main_sub(self):
         if not self.sock:
@@ -492,33 +500,54 @@ class FTX1MeterMonitor:
             self.vfo_status_label.config(text="?—")
 
     def next_memory(self):
-        """Go to the next memory channel (FTX-1 uses MC+;)."""
         self.logger.debug("Sending next memory channel")
-        resp = self.rig_cmd("w MC+;")
+        resp = self.rig_cmd("w CH0;")
         if resp and "MC" in resp:
             self.logger.info("Next memory channel sent")
         else:
             self.logger.warning(f"Next memory may have failed: {resp}")
 
-    def send_raw_cat(self, cat_str):
+    def send_raw_cat(self, cat_str, expect_response=True, timeout=2.5):
+        """
+        Send raw Yaesu CAT command and attempt to read response.
+        - expect_response=True for queries (MC;, IF;, etc.) — wait and return actual reply
+        - expect_response=False for pure sets (VM;, SH00xx;, etc.) — return success on timeout
+        Returns: actual response string (stripped) or None on failure / no response
+        """
         if not cat_str.endswith(';'):
             cat_str += ';'
         cmd = f"w {cat_str.upper()}"
+
         try:
-            self.logger.debug(f"Raw send (with w): {cmd}")
+            self.logger.debug(f"Raw send: {cmd}")
             self.sock.sendall((cmd + "\n").encode('ascii'))
-            self.sock.settimeout(2.5)
+
+            if not expect_response:
+                # Pure set: expect no reply or timeout is normal
+                try:
+                    resp = self._read_line(timeout=1.0)
+                    self.logger.debug(f"Unexpected read on set: {resp!r}")
+                except socket.timeout:
+                    pass
+                return "OK (set sent)"
+
+            # Query: wait longer and return actual response
+            self.sock.settimeout(timeout)
             try:
-                resp = self._read_line(timeout=1)
-                self.logger.debug(f"Read on set (usually empty): {resp}")
+                resp = self._read_line(timeout=timeout)
+                resp_clean = resp.strip() if resp else ""
+                self.logger.debug(f"Raw read success: {resp_clean!r}")
+                return resp_clean
             except socket.timeout:
-                self.logger.debug("Timeout on set (expected - no reply from radio)")
-            self.sock.settimeout(1.0)
-            return "OK (set sent, timeout normal)"
+                self.logger.debug("Timeout waiting for response on query")
+                return None
+            finally:
+                self.sock.settimeout(1.0)
+
         except Exception as e:
             self.logger.error(f"Raw CAT error: {e}")
             self.sock = None
-            return f"Error: {e}"
+            return None
 
     def update_bw_combo_options(self):
         mode = self.mode_var.get().strip()
@@ -1034,9 +1063,122 @@ class FTX1MeterMonitor:
             print(f"get_hamlib_level exception for {cmd}: {e}")
             return None
 
+    def get_current_memory_channel(self):
+        if not self.sock:
+            return None, None
+
+        side_prefix = "1" if self.current_vfo == "Sub" else "0"
+        cmd = f"MC{side_prefix};"
+
+        resp = self.send_raw_cat(cmd, expect_response=True, timeout=3.0)
+
+        if not resp or "OK" in resp or resp.strip() in ["?;", "MC;", "MC0;", "MC1;"]:
+            self.logger.warning(f"MC read failed or invalid: {resp!r}")
+            return None, None
+
+        resp_clean = resp.strip().rstrip(";")
+        if resp_clean.startswith("MC") and len(resp_clean) >= 7:
+            param = resp_clean[2:]
+            if len(param) == 6 and param.isdigit():
+                side = int(param[0])
+                ch_num = int(param[1:])
+                self.logger.info(f"MC parsed: side={side} ({'Main' if side == 0 else 'Sub'}), ch={ch_num:05d}")
+                return side, ch_num
+
+        self.logger.warning(f"Unexpected MC format: {resp_clean!r}")
+        return None, None
+
+    def jump_to_memory_channel(self, event=None):
+        if not self.sock or not self.is_memory_mode.get():
+            self.status_var.set("Not in memory mode or disconnected")
+            return
+
+        ch_str = self.memory_channel_var.get().strip()
+        if not ch_str.isdigit() or len(ch_str) > 5 or len(ch_str) < 1:
+            self.status_var.set("Enter 1–5 digits (e.g. 23, 2, 50002)")
+            return
+
+        ch_num = int(ch_str)
+        if ch_num == 0 or ch_num > 99999:
+            self.status_var.set("Channel out of range")
+            return
+
+        side_prefix = "1" if self.current_vfo == "Sub" else "0"
+        cmd_ch = f"{ch_num:05d}"
+        full_cmd = f"MC{side_prefix}{cmd_ch};"
+
+        self.logger.info(f"Sending raw: {full_cmd}")
+        resp = self.send_raw_cat(full_cmd, expect_response=False, timeout=1.5)
+        self.logger.debug(f"Set raw response (expected empty or OK): {resp!r}")
+
+        time.sleep(0.8)
+
+        new_side, new_ch = self.get_current_memory_channel()
+        if new_ch == ch_num:
+            self.status_var.set(f"Switched to channel {new_ch:05d} (side {'Main' if new_side==0 else 'Sub'})")
+            self.logger.info(f"Success → channel {new_ch:05d}")
+
+            # ── Inline forced refresh after successful switch ──
+            def _refresh_after_jump():
+                self.logger.info("Forced control + bandwidth refresh after memory channel jump")
+
+                # Full control sync (power, preamp, ATT, AGC, NR, NB, etc.)
+                self._perform_control_sync(force=True)
+
+                # Bandwidth sync (query SH0; and update combo)
+                mode = self.mode_var.get().strip().upper() or "USB"
+                sh_resp = self.rig_cmd("w SH0;", timeout=4.0)
+                if sh_resp and "SH" in sh_resp:
+                    try:
+                        idx_part = sh_resp.rstrip(";").split("SH")[1].strip().lstrip("0")
+                        idx = int(idx_part) if idx_part else 0
+                        self.logger.debug(f"SH0 after jump: {sh_resp} (index {idx})")
+
+                        key_mode = mode
+                        if "PKT" in key_mode or "DATA" in key_mode:
+                            key_mode = "PKTUSB"
+                        elif "RTTY" in key_mode:
+                            key_mode = "RTTY"
+                        elif "CW" in key_mode:
+                            key_mode = "CW-U"
+                        elif mode in ("USB", "LSB"):
+                            key_mode = "USB"
+
+                        options = self.bw_options_by_mode.get(key_mode, self.default_bw_options)
+
+                        if 1 <= idx <= len(options):
+                            real_bw = options[idx - 1]
+                            self.current_bw_str = real_bw
+                            self.bw_combo.set(real_bw)
+                            self.logger.info(f"BW refreshed after jump: {real_bw} Hz (index {idx})")
+                        else:
+                            self.logger.warning(f"BW index {idx} out of range")
+                            self.bw_combo.set("—")
+                    except Exception as ex:
+                        self.logger.error(f"SH0 parse failed after jump: {ex}")
+                        self.bw_combo.set("—")
+                else:
+                    self.logger.warning("No SH0 response after jump")
+                    self.bw_combo.set("—")
+
+                # Ensure combo options are fresh for current mode
+                self.update_bw_combo_options()
+
+        else:
+            self.status_var.set(f"Selected {ch_num:05d} (confirmation unavailable)")
+            self.logger.warning("No confirmation after set (normal with raw CAT)")
+
+        self.last_user_change_time = time.time()
+        self.ignore_readback_until = time.time() + 4.0
+
     def update_readings(self):
+        if hasattr(self, '_poll_running') and self._poll_running:
+            self.logger.debug("Poll already active - skipping duplicate")
+            return
+        self._poll_running = True
+
         now = time.time()
-        if now - self.last_user_change_time > 1.5:  # not right after user action
+        if now - self.last_user_change_time > 1.5:
             self._update_vfo_status()
 
         if now - self.last_control_sync_time > self.control_sync_interval:
@@ -1045,38 +1187,40 @@ class FTX1MeterMonitor:
 
         if not self.sock:
             self.update_status_style("Disconnected — reconnecting...", "red")
-            if not self.reconnect():
+            if self.reconnect():
+                self.status_var.set("Reconnected ✓")
+            else:
                 self.root.after(2000, self.update_readings)
                 return
 
         try:
-            self._drain_socket()
+            self._drain_socket()  # clear junk
 
-            # Primary query: IF; for MAIN band (freq + mode + VFO/Mem state)
-            if_resp = self.rig_cmd("w IF;")
-            if if_resp and if_resp.startswith("IF") and len(if_resp) >= 30:
-                # Use FULL raw response – no stripping
-                # Offsets exactly as per your corrected table (0-based, exclusive end)
+            # Limit read attempts to prevent hang
+            if_resp = self.rig_cmd("w IF;", timeout=3.0)
+            if not if_resp:
+                raise RuntimeError("IF; no response")
 
-                something    = if_resp[2:7]   # P1 = 5 bytes VFO or MT or QMB (50001 - 50020 = 5 Mhz band presets)
-                freq_raw     = if_resp[7:16]  # P2 - 9 bytes (VFO Hz)
-                clarifier    = if_resp[16:21] # P3 - 5 bytes (clarifier direction +/- 1 byte, offset 4 bytes)
-                clarifier_rx = if_resp[21:22] # P4 - 1 byte (Rx 0: off 1: on)
-                clarifier_tx = if_resp[22:23] # P5 - 1 byte (Tx 0: off 1: on)
-                mode_code    = if_resp[23:24] # P6 = 1 byte (MODE codes)
-                mode_type    = if_resp[24:25] # P7 = 1 byte (0=VFO, 1=Memory Channel, 2=Memory Tune, 3=QMB, 5=PMS)
-                encoding     = if_resp[26:27] # P8 = 1 byte (0: OFF 1: CTCSS ENC/DEC 2: CTCSS ENC 3: DCS 4: PR FREQ 5: REV TONE)
-                p9           = if_resp[27:29] # P9 = 2 bytes fixed 00
-                simplex      = if_resp[29:30] # P10 = 1 byte (0: Simplex 1: Plus Shift 2: Minus Shift)
+            if if_resp.startswith("IF") and len(if_resp) >= 30:
+                # Parse IF (unchanged)
+                something    = if_resp[2:7]
+                freq_raw     = if_resp[7:16]
+                clarifier    = if_resp[16:21]
+                clarifier_rx = if_resp[21:22]
+                clarifier_tx = if_resp[22:23]
+                mode_code    = if_resp[23:24]
+                mode_type    = if_resp[24:25]
+                encoding     = if_resp[26:27]
+                p9           = if_resp[27:29]
+                simplex      = if_resp[29:30]
 
                 self.last_mode_type = mode_type
 
-                # Frequency parsing
                 try:
                     freq_hz = int(freq_raw.strip())
                     freq_mhz = freq_hz / 1_000_000.0
                     freq_str = f"{freq_mhz:.6f} MHz"
-                except (ValueError, IndexError):
+                except:
                     freq_str = "—"
                     self.logger.warning(f"Freq parse failed: raw={freq_raw!r}")
 
@@ -1091,86 +1235,74 @@ class FTX1MeterMonitor:
                 self.mode_var.set(display_mode)
                 self.update_bw_combo_options()
 
-                # VFO/Memory detection using P7 (mode_type)
-                is_memory = mode_type in ["1", "2", "3", "5"]  # Memory Channel, Memory Tune, QMB, PMS
+                is_memory = mode_type in ["1", "2", "3", "5"]
 
-                # Sync local state + UI if changed (catches manual radio changes)
                 if time.time() >= self.ignore_readback_until and is_memory != self.is_memory_mode.get():
                     self.is_memory_mode.set(is_memory)
                     if is_memory:
                         self.v_m_btn.config(text="M → V")
                         self.freq_entry.config(state="disabled")
-                        if self.memory_next_btn is None:
-                            self.memory_next_btn = ttk.Button(
-                                self.freq_frame, text="Next Mem", width=8,
-                                command=self.next_memory
-                            )
-                        self.memory_next_btn.pack(side="left", padx=(5, 0))
+                        self.memory_entry.pack(side="left", padx=(5, 2))
+                        self.memory_go_btn.pack(side="left", padx=(0, 5))
+
+                        _, ch_num = self.get_current_memory_channel()
+                        if ch_num is not None:
+                            self.memory_channel_var.set(f"{ch_num:05d}")
+                        else:
+                            self.memory_channel_var.set("00001")
                     else:
                         self.v_m_btn.config(text="V → M")
                         self.freq_entry.config(state="normal")
-                        if self.memory_next_btn:
-                            self.memory_next_btn.pack_forget()
+                        self.memory_entry.pack_forget()
+                        self.memory_go_btn.pack_forget()
 
                     self.logger.info(f"Poll detected mode change → {'Memory' if is_memory else 'VFO'} (P7={mode_type})")
 
-                # Frequency display with prefix if memory mode
                 display_prefix = ""
                 if is_memory:
-                    mc_resp = self.rig_cmd("w MC;")
-                    if mc_resp and mc_resp.startswith("MC"):
-                        ch_raw = mc_resp[2:].rstrip(";").lstrip("0")
-                        ch_str = ch_raw if ch_raw else "?"
-                        display_prefix = f"CH {ch_str}  "
+                    side, ch_num = self.get_current_memory_channel()
+                    if ch_num is not None:
+                        side_str = "Main" if side == 0 else "Sub"
+                        if 50000 <= ch_num <= 50200:
+                            preset_id = ch_num - 50000 + 1
+                            display_prefix = f"5 MHz Preset {preset_id:02d} ({side_str})  "
+                        else:
+                            display_prefix = f"CH {ch_num:05d} ({side_str})  "
                     else:
-                        display_prefix = "Memory  "
+                        display_prefix = "Memory (?)  "
 
                 self.freq_var.set(display_prefix + freq_str)
 
-                self.logger.debug(
-                    f"Poll: freq={freq_str}, mode={display_mode} (code {mode_code}), "
-                    f"P7={mode_type}, memory={is_memory}"
-                )
-
             else:
-                # Fallback if IF; fails or is too short
-                if if_resp:
-                    self.logger.warning(f"IF; poll invalid or short: {if_resp!r}")
-                else:
-                    self.logger.warning("IF; poll returned None/empty")
                 self.freq_var.set("IF poll failed")
 
-                # Quick fallback freq
-                f = self.rig_cmd("f")
-                if f and f.replace(".", "").replace("-", "").isdigit():
-                    try:
-                        freq_mhz = float(f) / 1_000_000
-                        self.freq_var.set(f"{freq_mhz:.6f} MHz")
-                    except:
-                        pass
-
-            # Meters — unchanged from your original
             for name, cfg in self.left_meters.items():
-                raw_str = self.get_hamlib_level(cfg["hamlib_cmd"])
-                if raw_str is None:
-                    self.update_meter_gui(name, 0.0)
-                    continue
                 try:
+                    raw_str = self.get_hamlib_level(cfg["hamlib_cmd"])
+                    if raw_str is None:
+                        self.update_meter_gui(name, 0.0)
+                        continue
                     raw = float(raw_str)
                     value = cfg["scale"](raw)
                     if cfg.get("tx_only", False) and value <= 0.0:
                         value = 0.0
                     self.update_meter_gui(name, value)
-                except:
+                except Exception as meter_e:
+                    self.logger.debug(f"Meter {name} update failed: {meter_e}")
                     self.update_meter_gui(name, 0.0)
 
+            # Always schedule next poll (critical!)
+            self.root.after(1000, self.update_readings)
+            self._poll_running = False
+
         except Exception as e:
-            self.logger.error(f"Polling error: {e}")
-            self.sock = None
-            self.freq_var.set("Polling Err")
+            self.logger.error(f"Polling loop crashed: {e}", exc_info=True)
+            self.sock = None  # force reconnect next time
+            self.freq_var.set("Polling Err - retrying")
+            self.update_status_style("Polling error - reconnecting...", "red")
+            self.root.after(2000, self.update_readings)  # retry sooner
 
         self.update_status_style("Connected ✓", "#00CC00", bold=True)
-        self.root.after(1000, self.update_readings)
 
     def reconnect(self):
         self.update_status_style("Disconnected — reconnecting...", "red")
@@ -1189,7 +1321,6 @@ class FTX1MeterMonitor:
             except:
                 pass
         self.root.destroy()
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FTX-1 Meter Monitor")
